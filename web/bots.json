@@ -1,0 +1,18 @@
+{
+  "bots": {
+    "102ef23041ea": {
+      "id": "102ef23041ea",
+      "host": "185.100.157.243",
+      "ssh_port": 22,
+      "ssh_user": "root",
+      "alias": "exsender1",
+      "install_dir": "/opt/userbot",
+      "api_port": 8765,
+      "api_token": "z-XIu_4fYsgqcAFcrcWVT56UdWlGPl4TjGlEQ5xbSVA",
+      "status": "running",
+      "last_deploy_at": 1779573787.2683446,
+      "last_error": "",
+      "has_ssh_key": true
+    }
+  }
+}

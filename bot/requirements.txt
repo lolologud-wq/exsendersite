@@ -1,0 +1,7 @@
+telethon>=1.36.0
+python-dotenv>=1.0.0
+python-telegram-bot[socks]>=21.6
+PySocks>=1.7.1
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9

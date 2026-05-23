@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>exsender · Вход</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="logo-mark">e</span>
+        <div>
+          <h1 class="login-title">exsender</h1>
+          <p class="login-sub">Панель управления рассылкой</p>
+        </div>
+      </div>
+
+      <form id="loginForm" class="login-form" autocomplete="on">
+        <div class="field">
+          <label class="field-label" for="login">Логин</label>
+          <input class="input" id="login" name="login" type="text" required autocomplete="username" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="password">Пароль</label>
+          <input class="input" id="password" name="password" type="password" required autocomplete="current-password" />
+        </div>
+        <p class="login-error" id="loginError" hidden></p>
+        <button type="submit" class="btn-primary login-submit" id="loginBtn">
+          <span>Войти</span>
+        </button>
+      </form>
+    </div>
+  </div>
+  <script src="js/login.js"></script>
+</body>
+</html>

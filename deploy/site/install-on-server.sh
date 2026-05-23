@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Run on the site VPS as root (Ubuntu/Debian).
+# Usage: bash install-on-server.sh [domain]
+set -euo pipefail
+
+DOMAIN="${1:-exsender.top}"
+INSTALL_ROOT="/opt/exsender"
+WEB_DIR="${INSTALL_ROOT}/web"
+SERVICE_USER="exsender"
+ARCHIVE="${2:-/tmp/exsender-site.tar.gz}"
+
+echo "==> exsender site install (${DOMAIN})"
+
+if [[ ! -f "${ARCHIVE}" ]]; then
+  echo "Archive not found: ${ARCHIVE}"
+  echo "Upload exsender-site.tar.gz to /tmp first (deploy-site.ps1)."
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq python3 python3-venv python3-pip nginx certbot python3-certbot-nginx curl ufw
+
+ufw allow OpenSSH 2>/dev/null || true
+ufw allow 80/tcp 2>/dev/null || true
+ufw allow 443/tcp 2>/dev/null || true
+ufw --force enable 2>/dev/null || true
+
+if ! id "${SERVICE_USER}" &>/dev/null; then
+  useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}"
+fi
+
+mkdir -p "${INSTALL_ROOT}"
+rm -rf "${INSTALL_ROOT}/web" "${INSTALL_ROOT}/frontend"
+tar -xzf "${ARCHIVE}" -C "${INSTALL_ROOT}"
+
+if [[ ! -f "${WEB_DIR}/.env" ]]; then
+  if [[ -f "${WEB_DIR}/.env.example" ]]; then
+    cp "${WEB_DIR}/.env.example" "${WEB_DIR}/.env"
+  else
+    touch "${WEB_DIR}/.env"
+  fi
+  echo "Created ${WEB_DIR}/.env — edit SITE_SECRET and passwords!"
+fi
+
+grep -q '^SITE_PUBLIC_URL=' "${WEB_DIR}/.env" || echo "SITE_PUBLIC_URL=https://${DOMAIN}" >> "${WEB_DIR}/.env"
+grep -q '^SITE_COOKIE_SECURE=' "${WEB_DIR}/.env" || echo "SITE_COOKIE_SECURE=1" >> "${WEB_DIR}/.env"
+grep -q '^SITE_HOST=' "${WEB_DIR}/.env" || echo "SITE_HOST=127.0.0.1" >> "${WEB_DIR}/.env"
+grep -q '^SITE_PORT=' "${WEB_DIR}/.env" || echo "SITE_PORT=3000" >> "${WEB_DIR}/.env"
+
+if grep -q 'please-generate-a-long-random-string-here\|change-me-please' "${WEB_DIR}/.env" 2>/dev/null; then
+  SEC="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  sed -i "s/^SITE_SECRET=.*/SITE_SECRET=${SEC}/" "${WEB_DIR}/.env" || echo "SITE_SECRET=${SEC}" >> "${WEB_DIR}/.env"
+  echo "Generated new SITE_SECRET in .env"
+fi
+
+python3 -m venv "${WEB_DIR}/.venv"
+"${WEB_DIR}/.venv/bin/pip" install --upgrade pip -q
+"${WEB_DIR}/.venv/bin/pip" install -r "${WEB_DIR}/requirements.txt" -q
+
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
+chmod 600 "${WEB_DIR}/.env" 2>/dev/null || true
+chmod 600 "${WEB_DIR}/deploy_key" 2>/dev/null || true
+
+cp "${INSTALL_ROOT}/deploy/site/exsender.service" /etc/systemd/system/exsender.service
+cp "${INSTALL_ROOT}/deploy/site/nginx-exsender.conf" /etc/nginx/sites-available/exsender
+
+ln -sf /etc/nginx/sites-available/exsender /etc/nginx/sites-enabled/exsender
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+
+systemctl daemon-reload
+systemctl enable exsender
+systemctl restart exsender
+systemctl reload nginx
+
+echo "==> HTTP ok. Requesting Let's Encrypt certificate..."
+CERTBOT_EMAIL="admin@${DOMAIN}"
+if getent ahosts "www.${DOMAIN}" >/dev/null 2>&1; then
+  certbot --nginx -d "${DOMAIN}" -d "www.${DOMAIN}" --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" --redirect || CERT_FAIL=1
+else
+  echo "www.${DOMAIN} has no DNS — certificate for apex only."
+  certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" --redirect || CERT_FAIL=1
+fi
+if [[ "${CERT_FAIL:-}" == "1" ]]; then
+  echo "certbot failed — check DNS A for ${DOMAIN}, then run:"
+  echo "  certbot --nginx -d ${DOMAIN}"
+fi
+
+systemctl restart exsender
+echo "==> Done. Open https://${DOMAIN}/login"
