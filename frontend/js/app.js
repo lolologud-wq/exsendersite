@@ -39,6 +39,8 @@ const STATE = {
   sourcesChannels: [],
   serverLogPollTimer: null,
   serverLogTarget: null,
+  selectedAccounts: new Set(),
+  activityCache: null,
 };
 
 // =======================================================
@@ -145,6 +147,72 @@ const restartBot        = (bid, body)        => siteApi("POST",   `/api/bots/${e
 const stopBot           = (bid, body)        => siteApi("POST",   `/api/bots/${encodeURIComponent(bid)}/stop`, body || {});
 const uninstallBot      = (bid, body)        => siteApi("POST",   `/api/bots/${encodeURIComponent(bid)}/uninstall`, body || {});
 const fetchDeployLog    = (bid)              => siteApi("GET",    `/api/bots/${encodeURIComponent(bid)}/deploy/log`);
+const fetchActivity     = (days, botId, account) => {
+  let q = `?days=${encodeURIComponent(days || 14)}`;
+  if (account) q += `&account=${encodeURIComponent(account)}`;
+  return botApi("GET", `/activity${q}`, undefined, botId);
+};
+const checkProxy        = (proxy, botId)     => botApi("POST",   "/proxy/check", { proxy: proxy || "" }, botId);
+
+function accountKey(botId, accountId) {
+  return `${botId}:${accountId}`;
+}
+
+function parseAccountKey(key) {
+  const i = String(key).indexOf(":");
+  if (i < 0) return { botId: "", accountId: key };
+  return { botId: key.slice(0, i), accountId: key.slice(i + 1) };
+}
+
+function proxyFieldHtml(name = "proxy", placeholder = "login:pass@host:port", extra = "") {
+  return `
+    <label class="field">
+      <span class="field-label">Прокси</span>
+      <div class="proxy-field-row">
+        <input class="input mono" name="${escapeHtml(name)}" placeholder="${escapeHtml(placeholder)}" ${extra} />
+        <button type="button" class="btn-ghost proxy-check-btn">Проверить</button>
+      </div>
+      <span class="field-hint proxy-check-result" hidden></span>
+    </label>`;
+}
+
+async function runProxyCheck(inputEl, resultEl, botIdGetter) {
+  const proxy = String(inputEl?.value || "").trim();
+  const botId = typeof botIdGetter === "function" ? botIdGetter() : botIdGetter;
+  if (!botId) { toastErr(new Error("Выбери VDS")); return; }
+  if (resultEl) {
+    resultEl.hidden = false;
+    resultEl.textContent = "Проверяю…";
+    resultEl.className = "field-hint proxy-check-result";
+  }
+  try {
+    const res = await checkProxy(proxy, botId);
+    if (resultEl) {
+      resultEl.textContent = res.message || (res.ok ? "OK" : "Ошибка");
+      resultEl.classList.toggle("ok", !!res.ok);
+      resultEl.classList.toggle("err", !res.ok);
+    }
+    if (res.ok) toastOk(res.message || "Прокси OK");
+    else toastErr(new Error(res.message || res.error || "Прокси недоступен"));
+  } catch (e) {
+    if (resultEl) {
+      resultEl.textContent = e.message;
+      resultEl.classList.add("err");
+    }
+    toastErr(e);
+  }
+}
+
+function bindProxyCheckIn(root, botIdGetter) {
+  root?.querySelectorAll(".proxy-check-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const field = btn.closest(".field");
+      const input = field?.querySelector('input[name="proxy"]') || field?.querySelector(".input.mono");
+      const result = field?.querySelector(".proxy-check-result");
+      runProxyCheck(input, result, botIdGetter);
+    });
+  });
+}
 
 function botLabel(botId) {
   const b = STATE.bots.find((x) => x.id === botId);
@@ -492,28 +560,28 @@ function renderMessagesPie(ov) {
   if (quota <= 0) {
     host.hidden = false;
     if (emptyEl) emptyEl.hidden = true;
-    if (legend) legend.textContent = `отправлено: ${fmtNumber(totalSent)} · лимиты не заданы`;
+    if (legend) legend.textContent = `отправлено: ${fmtNumber(totalSent)}`;
     host.innerHTML = `
       ${renderPieSvg(
         [{ value: totalSent || 1, cls: "pie-sent" }],
-        { donut: true, center: fmtNumber(totalSent), sub: "без лимита" },
+        { donut: true, center: fmtNumber(totalSent) },
       )}
       <div class="pie-legend">
         <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(totalSent)}</b></div>
-        <div class="pie-legend-item cell-dim">Задайте лимит в настройках чата для «осталось»</div>
       </div>`;
     return;
   }
 
   const total = sent + remaining;
   if (total <= 0) {
-    host.hidden = true;
-    host.innerHTML = "";
-    if (emptyEl) {
-      emptyEl.hidden = false;
-      emptyEl.textContent = "Нет данных по лимитам";
-    }
-    if (legend) legend.textContent = "—";
+    host.hidden = false;
+    if (emptyEl) emptyEl.hidden = true;
+    if (legend) legend.textContent = "отправлено: 0";
+    host.innerHTML = `
+      ${renderPieSvg([{ value: 1, cls: "pie-sent" }], { donut: true, center: "0" })}
+      <div class="pie-legend">
+        <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>0</b></div>
+      </div>`;
     return;
   }
 
@@ -536,6 +604,340 @@ function renderMessagesPie(ov) {
       <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(sent)}</b></div>
       <div class="pie-legend-item"><span class="pie-dot unsent"></span>Не отправлено <b>${fmtNumber(remaining)}</b></div>
     </div>`;
+}
+
+// =======================================================
+//  Activity heatmap
+// =======================================================
+const HEATMAP_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+function heatmapLevel(count, maxVal) {
+  if (!count || count <= 0) return 0;
+  if (!maxVal || maxVal <= 0) return 1;
+  const ratio = count / maxVal;
+  if (ratio >= 0.85) return 5;
+  if (ratio >= 0.6) return 4;
+  if (ratio >= 0.35) return 3;
+  if (ratio >= 0.15) return 2;
+  return 1;
+}
+
+function mergeActivityPayloads(list) {
+  const dayMap = new Map();
+  let total = 0;
+  let max = 0;
+  for (const item of list) {
+    if (!item?.rows) continue;
+    for (const row of item.rows) {
+      const prev = dayMap.get(row.date) || Array(24).fill(0);
+      const hours = row.hours.map((v, i) => {
+        const n = (prev[i] || 0) + (v || 0);
+        max = Math.max(max, n);
+        return n;
+      });
+      dayMap.set(row.date, hours);
+      total += row.total || 0;
+    }
+  }
+  const rows = [...dayMap.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, hours]) => {
+      const d = new Date(date + "T12:00:00");
+      const dayTotal = hours.reduce((s, v) => s + v, 0);
+      return {
+        date,
+        weekday: isNaN(d.getTime()) ? 0 : (d.getDay() + 6) % 7,
+        hours,
+        total: dayTotal,
+      };
+    });
+  return { rows, total, max, days: rows.length };
+}
+
+async function fetchMergedActivity(days = 14) {
+  await loadBots();
+  const payloads = [];
+  const bid = STATE.dashboardBotId;
+  const bots = bid ? STATE.bots.filter((b) => b.id === bid) : STATE.bots;
+  for (const bot of bots) {
+    if (!bot.hasApiToken && bot.status === "new") continue;
+    try {
+      const data = await fetchActivity(days, bot.id);
+      if (data?.rows) payloads.push(data);
+    } catch (e) {
+      console.warn("activity failed", bot.id, e);
+    }
+  }
+  return mergeActivityPayloads(payloads);
+}
+
+function renderActivityHeatmap(data) {
+  const host = document.getElementById("activityHeatmapHost");
+  const legend = document.getElementById("heatmapLegend");
+  if (!host) return;
+
+  const rows = data?.rows || [];
+  const maxVal = data?.max || 0;
+  const total = data?.total || 0;
+
+  if (!rows.length) {
+    host.innerHTML = `<div class="chart-empty">Пока нет отправок за выбранный период</div>`;
+    if (legend) legend.textContent = "14 дней · по часам";
+    return;
+  }
+
+  if (legend) {
+    legend.textContent = `${fmtNumber(total)} отправок · max ${maxVal}/ч`;
+  }
+
+  const hourLabels = Array.from({ length: 24 }, (_, h) =>
+    `<span class="hm-h">${h % 6 === 0 ? String(h).padStart(2, "0") : ""}</span>`,
+  ).join("");
+
+  host.innerHTML = `
+    <div class="heatmap-grid">
+      <div class="heatmap-hour-labels"><span></span>${hourLabels}</div>
+      ${rows.map((row) => {
+        const label = HEATMAP_DOW[row.weekday] || row.date.slice(5);
+        return `
+          <div class="heatmap-row" title="${escapeHtml(row.date)} · ${row.total} отправок">
+            <span class="heatmap-row-label">${escapeHtml(label)}</span>
+            ${row.hours.map((c, h) => {
+              const lv = heatmapLevel(c, maxVal);
+              const tip = `${row.date} ${String(h).padStart(2, "0")}:00 — ${c} msg`;
+              return `<span class="heatmap-cell" data-level="${lv}" title="${escapeHtml(tip)}"></span>`;
+            }).join("")}
+          </div>`;
+      }).join("")}
+    </div>
+    <div class="heatmap-legend">
+      <span>меньше</span>
+      <div class="heatmap-legend-scale">
+        ${[0, 1, 2, 3, 4, 5].map((lv) => `<i data-level="${lv}"></i>`).join("")}
+      </div>
+      <span>больше</span>
+    </div>`;
+
+  host.querySelectorAll(".heatmap-legend-scale i").forEach((el) => {
+    const lv = el.dataset.level;
+    const sample = host.querySelector(`.heatmap-cell[data-level="${lv}"]`);
+    if (sample) el.style.background = getComputedStyle(sample).backgroundColor;
+  });
+}
+
+async function refreshActivityHeatmap() {
+  try {
+    const data = await fetchMergedActivity(14);
+    STATE.activityCache = data;
+    renderActivityHeatmap(data);
+  } catch (e) {
+    const host = document.getElementById("activityHeatmapHost");
+    if (host) host.innerHTML = `<div class="chart-empty">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// =======================================================
+//  Accounts — bulk, swipe, sessions
+// =======================================================
+function updateBulkBar() {
+  const bar = document.getElementById("accountsBulkBar");
+  const countEl = document.getElementById("bulkCount");
+  const n = STATE.selectedAccounts.size;
+  if (bar) bar.hidden = n === 0;
+  if (countEl) countEl.textContent = `${n} ${pluralRu(n, ["выбран", "выбрано", "выбрано"])}`;
+}
+
+function toggleAccountSelection(key, on) {
+  if (on) STATE.selectedAccounts.add(key);
+  else STATE.selectedAccounts.delete(key);
+  updateBulkBar();
+}
+
+function getSelectedAccountRows() {
+  return [...STATE.selectedAccounts].map(parseAccountKey).filter((x) => x.botId && x.accountId);
+}
+
+async function bulkSetSpam(running) {
+  const rows = getSelectedAccountRows();
+  if (!rows.length) return;
+  let ok = 0;
+  for (const { botId, accountId } of rows) {
+    try {
+      await setSpam(accountId, running, botId);
+      ok++;
+    } catch (e) {
+      console.warn("bulk spam", accountId, e);
+    }
+  }
+  toastOk(`${running ? "Старт" : "Стоп"}: ${ok}/${rows.length}`);
+  STATE.selectedAccounts.clear();
+  updateBulkBar();
+  refreshAccounts(true);
+}
+
+async function bulkDeleteSelected() {
+  const rows = getSelectedAccountRows();
+  if (!rows.length) return;
+  if (!confirm(`Удалить ${rows.length} ${pluralRu(rows.length, ["аккаунт", "аккаунта", "аккаунтов"])}?`)) return;
+  let ok = 0;
+  for (const { botId, accountId } of rows) {
+    try {
+      await deleteSlot(accountId, botId);
+      ok++;
+    } catch (e) {
+      console.warn("bulk delete", accountId, e);
+    }
+  }
+  toastOk(`Удалено: ${ok}/${rows.length}`);
+  STATE.selectedAccounts.clear();
+  updateBulkBar();
+  refreshAccounts(true);
+}
+
+function renderSessionStatusList() {
+  const host = document.getElementById("sessionStatusList");
+  if (!host) return;
+  const rows = flattenAccounts();
+  if (!rows.length) {
+    host.innerHTML = `<div class="field-hint">Нет слотов — загрузи .session или создай аккаунт</div>`;
+    return;
+  }
+  host.innerHTML = rows.map((a) => {
+    const auth = a.authorized
+      ? `<span class="chip on">авторизован</span>`
+      : `<span class="chip off">нет входа</span>`;
+    const spam = a.spamRunning ? `<span class="chip on">spam</span>` : `<span class="chip">stop</span>`;
+    return `
+      <div class="session-status-item">
+        <div>
+          <span class="cell-strong">${escapeHtml(a.id)}</span>
+          <span class="mono cell-dim"> · ${escapeHtml(a.botLabel || botLabel(a.botId))}</span>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">${auth}${spam}</div>
+      </div>`;
+  }).join("");
+}
+
+function bindAccountSwipeRows() {
+  if (!window.matchMedia("(max-width: 900px)").matches) return;
+  document.querySelectorAll("#accountsBody tr.account-row").forEach((row) => {
+    if (row.dataset.swipeBound) return;
+    row.dataset.swipeBound = "1";
+    const id = row.dataset.id;
+    const bot = row.dataset.bot;
+    const acc = findAccount(id, bot) || { spamRunning: false };
+
+    let actions = row.querySelector(".account-swipe-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "account-swipe-actions";
+      actions.innerHTML = `
+        <button class="ra ra-${acc.spamRunning ? "stop" : "start"}" data-swipe="spam" title="${acc.spamRunning ? "Стоп" : "Старт"}">
+          ${acc.spamRunning
+            ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
+            : '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"/></svg>'}
+        </button>
+        <button class="ra" data-swipe="settings" title="Настройки">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </button>`;
+      row.appendChild(actions);
+    }
+
+    actions.querySelector('[data-swipe="spam"]')?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleRowAction("spam", id, bot);
+      row.classList.remove("swipe-open");
+    });
+    actions.querySelector('[data-swipe="settings"]')?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleRowAction("settings", id, bot);
+      row.classList.remove("swipe-open");
+    });
+
+    let startX = 0;
+    let tracking = false;
+    row.addEventListener("touchstart", (e) => {
+      if (e.target.closest("input, button, .ra, label.switch")) return;
+      startX = e.touches[0].clientX;
+      tracking = true;
+    }, { passive: true });
+    row.addEventListener("touchmove", (e) => {
+      if (!tracking) return;
+      const dx = e.touches[0].clientX - startX;
+      if (dx < -40) row.classList.add("swipe-open");
+      if (dx > 40) row.classList.remove("swipe-open");
+    }, { passive: true });
+    row.addEventListener("touchend", () => { tracking = false; });
+  });
+}
+
+function bindSessionManager() {
+  const zone = document.getElementById("sessionDropZone");
+  const input = document.getElementById("sessionFileInput");
+  const btn = document.getElementById("sessionUploadBtn");
+  if (!zone || !input) return;
+
+  const pickFile = (file) => {
+    if (!file) return;
+    if (!file.name.endsWith(".session")) {
+      toastErr(new Error("Нужен файл .session"));
+      return;
+    }
+    const base = file.name.replace(/\.session$/i, "");
+    openUploadSessionModal(base, file);
+  };
+
+  btn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    input.click();
+  });
+  zone.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
+    pickFile(input.files?.[0]);
+    input.value = "";
+  });
+
+  ["dragenter", "dragover"].forEach((ev) => {
+    zone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zone.classList.add("dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach((ev) => {
+    zone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zone.classList.remove("dragover");
+    });
+  });
+  zone.addEventListener("drop", (e) => {
+    pickFile(e.dataTransfer?.files?.[0]);
+  });
+}
+
+function bindBulkActions() {
+  document.getElementById("bulkStart")?.addEventListener("click", () => bulkSetSpam(true));
+  document.getElementById("bulkStop")?.addEventListener("click", () => bulkSetSpam(false));
+  document.getElementById("bulkDelete")?.addEventListener("click", () => bulkDeleteSelected());
+  document.getElementById("bulkClear")?.addEventListener("click", () => {
+    STATE.selectedAccounts.clear();
+    document.querySelectorAll(".acc-select").forEach((cb) => { cb.checked = false; });
+    const all = document.getElementById("accountsSelectAll");
+    if (all) all.checked = false;
+    updateBulkBar();
+  });
+  document.getElementById("bulkSelectAll")?.addEventListener("click", () => {
+    flattenAccounts().forEach((a) => STATE.selectedAccounts.add(accountKey(a.botId, a.id)));
+    renderAccountsTable();
+  });
+  document.getElementById("accountsSelectAll")?.addEventListener("change", (e) => {
+    const on = e.target.checked;
+    flattenAccounts().forEach((a) => {
+      const k = accountKey(a.botId, a.id);
+      if (on) STATE.selectedAccounts.add(k);
+      else STATE.selectedAccounts.delete(k);
+    });
+    renderAccountsTable();
+  });
 }
 
 // =======================================================
@@ -684,21 +1086,26 @@ function renderAccountsTable() {
   if (countEl) countEl.textContent = `${filtered.length} / ${all.length}`;
 
   if (!all.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty-row">Нет аккаунтов — добавь через «+ Аккаунт» или загрузи .session</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty-row">Нет аккаунтов — добавь через «+ Аккаунт» или загрузи .session</td></tr>`;
     return;
   }
   if (!filtered.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty-row">Нет аккаунтов под текущий фильтр</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty-row">Нет аккаунтов под текущий фильтр</td></tr>`;
     return;
   }
 
   body.innerHTML = filtered.map((a) => {
     const isActive = a.id === a.activeAccountId;
     const initials = a.id.slice(0, 2).toUpperCase();
+    const key = accountKey(a.botId, a.id);
+    const checked = STATE.selectedAccounts.has(key);
     return `
-      <tr class="${isActive ? "row-active" : ""}" data-id="${escapeHtml(a.id)}" data-bot="${escapeHtml(a.botId)}">
-        <td><span class="cell-strong">${escapeHtml(a.botLabel || botLabel(a.botId))}</span></td>
-        <td>
+      <tr class="account-row ${isActive ? "row-active" : ""}" data-id="${escapeHtml(a.id)}" data-bot="${escapeHtml(a.botId)}">
+        <td class="td-check" data-label="">
+          <input type="checkbox" class="acc-select" data-key="${escapeHtml(key)}" ${checked ? "checked" : ""} aria-label="Выбрать ${escapeHtml(a.id)}" />
+        </td>
+        <td data-label="VDS"><span class="cell-strong">${escapeHtml(a.botLabel || botLabel(a.botId))}</span></td>
+        <td data-label="Аккаунт">
           <div class="course-cell">
             <div class="course-thumb account-thumb">${escapeHtml(initials)}</div>
             <div class="account-meta">
@@ -707,15 +1114,25 @@ function renderAccountsTable() {
             </div>
           </div>
         </td>
-        <td>${statusBadge(a)}</td>
-        <td><span class="cell-strong">${fmtNumber(a.chats.enabled)}</span><span class="cell-dim"> / ${fmtNumber(a.chats.total)}</span></td>
-        <td>${fmtMinutes(a.defaultIntervalMin)}${fmtJitter(a.defaultIntervalJitter)}</td>
-        <td>${a.hasProxy ? `<span class="mono cell-dim">${escapeHtml(a.proxy || "configured")}</span>` : '<span class="cell-mute">нет</span>'}</td>
-        <td><span class="cell-strong">${fmtNumber(accountMessagesSent(a))}</span></td>
-        <td>${rowActions(a)}</td>
+        <td data-label="Статус">${statusBadge(a)}</td>
+        <td data-label="Чаты"><span class="cell-strong">${fmtNumber(a.chats.enabled)}</span><span class="cell-dim"> / ${fmtNumber(a.chats.total)}</span></td>
+        <td data-label="Интервал">${fmtMinutes(a.defaultIntervalMin)}${fmtJitter(a.defaultIntervalJitter)}</td>
+        <td data-label="Прокси">${a.hasProxy ? `<span class="mono cell-dim">${escapeHtml(a.proxy || "configured")}</span>` : '<span class="cell-mute">нет</span>'}</td>
+        <td data-label="Отправлено"><span class="cell-strong">${fmtNumber(accountMessagesSent(a))}</span></td>
+        <td data-label="Действия" class="td-actions">${rowActions(a)}</td>
       </tr>
     `;
   }).join("");
+
+  body.querySelectorAll(".acc-select").forEach((cb) => {
+    cb.addEventListener("change", () => toggleAccountSelection(cb.dataset.key, cb.checked));
+  });
+  const allCb = document.getElementById("accountsSelectAll");
+  if (allCb) {
+    allCb.checked = filtered.length > 0 && filtered.every((a) => STATE.selectedAccounts.has(accountKey(a.botId, a.id)));
+  }
+  bindAccountSwipeRows();
+  updateBulkBar();
 }
 
 // =======================================================
@@ -768,11 +1185,7 @@ function openAddSlotModal() {
           <input class="input mono" name="id" placeholder="например, alex42" pattern="[a-zA-Z][a-zA-Z0-9_-]{0,31}" required />
           <span class="field-hint">латиница/цифры/«_»/«-», 1–32 символа, первая буква</span>
         </label>
-        <label class="field">
-          <span class="field-label">Прокси</span>
-          <input class="input mono" name="proxy" placeholder="login:pass@host:port или socks5://…" />
-          <span class="field-hint">Оставь пустым — без прокси. Можно поменять позже.</span>
-        </label>
+        ${proxyFieldHtml("proxy", "login:pass@host:port или socks5://…")}
         <div class="field-row">
           <label class="field">
             <span class="field-label">Интервал, мин</span>
@@ -794,6 +1207,11 @@ function openAddSlotModal() {
       </form>
     `,
     footer: modalActions("Создать"),
+  });
+
+  bindProxyCheckIn(document.getElementById("modalBody"), () => {
+    const f = document.getElementById("addSlotForm");
+    return f ? String(new FormData(f).get("botId") || "").trim() : defaultBotId();
   });
 
   document.getElementById("modalSubmit").addEventListener("click", async () => {
@@ -986,12 +1404,15 @@ function openAuthModal(aid, botId) {
 // =======================================================
 //  Upload .session file
 // =======================================================
-function openUploadSessionModal(presetSlotId) {
+function openUploadSessionModal(presetSlotId, presetFile) {
   if (!STATE.bots.length) {
     toastErr(new Error("Сначала добавь VDS через «Серверы → + VDS»"));
     return;
   }
   const presetBot = defaultBotId();
+  const fileHint = presetFile
+    ? `<div class="callout">Файл: <b>${escapeHtml(presetFile.name)}</b> (${Math.round(presetFile.size / 1024)} KiB)</div>`
+    : "";
   openModal({
     title: "Загрузить .session",
     body: `
@@ -999,22 +1420,30 @@ function openUploadSessionModal(presetSlotId) {
         <div class="callout">
           Файл <code>имя.session</code> с Telethon будет загружен на выбранный VDS.
         </div>
+        ${fileHint}
         ${vdsFieldHtml(presetBot)}
         <label class="field">
           <span class="field-label">ID слота <em>обязательно</em></span>
           <input class="input mono" name="slotId" value="${escapeHtml(presetSlotId || "")}" placeholder="acc1" pattern="[a-zA-Z][a-zA-Z0-9_-]{0,31}" required />
         </label>
-        <label class="field">
-          <span class="field-label">Прокси</span>
-          <input class="input mono" name="proxy" placeholder="login:pass@host:port (опционально)" />
-        </label>
-        <label class="field">
+        ${proxyFieldHtml("proxy", "login:pass@host:port (опционально)")}
+        <label class="field" id="sessionFileField" ${presetFile ? "hidden" : ""}>
           <span class="field-label">Файл .session <em>обязательно</em></span>
-          <input class="input" name="sessionFile" type="file" accept=".session" required />
+          <input class="input" name="sessionFile" type="file" accept=".session" ${presetFile ? "" : "required"} />
         </label>
       </form>
     `,
     footer: modalActions("Загрузить"),
+  });
+
+  if (presetFile) {
+    const form = document.getElementById("uploadSessionForm");
+    form.dataset.presetFile = "1";
+  }
+
+  bindProxyCheckIn(document.getElementById("modalBody"), () => {
+    const f = document.getElementById("uploadSessionForm");
+    return f ? String(new FormData(f).get("botId") || "").trim() : presetBot;
   });
 
   bindModalSubmit(async () => {
@@ -1028,7 +1457,7 @@ function openUploadSessionModal(presetSlotId) {
       toastErr(new Error("ID слота: первая буква латиница"));
       return;
     }
-    const file = fd.get("sessionFile");
+    const file = presetFile || fd.get("sessionFile");
     if (!file || !file.size) { toastErr(new Error("Выбери .session файл")); return; }
     const btn = document.getElementById("modalSubmit");
     btn.disabled = true;
@@ -1129,18 +1558,18 @@ function allChatRow(row) {
     : "";
   return `
     <tr data-cid="${escapeHtml(c.chatId)}" data-bot="${escapeHtml(row.botId)}" data-aid="${escapeHtml(row.accountId)}">
-      <td><label class="switch"><input type="checkbox" data-act="toggle" ${c.enabled ? "checked" : ""} /><span></span></label></td>
-      <td><span class="cell-strong">${escapeHtml(row.botLabel || botLabel(row.botId))}</span></td>
-      <td><span class="mono">${escapeHtml(row.accountId)}</span></td>
-      <td>
+      <td data-label="Вкл" class="td-toggle"><label class="switch"><input type="checkbox" data-act="toggle" ${c.enabled ? "checked" : ""} /><span></span></label></td>
+      <td data-label="VDS"><span class="cell-strong">${escapeHtml(row.botLabel || botLabel(row.botId))}</span></td>
+      <td data-label="Аккаунт"><span class="mono">${escapeHtml(row.accountId)}</span></td>
+      <td data-label="Группа">
         ${title}
         <span class="mono cell-dim">${escapeHtml(c.chatId)}</span>
         ${c.configured === false ? '<span class="badge badge-pending" style="margin-left:6px">new</span>' : ""}
       </td>
-      <td>${interval}</td>
-      <td>${hasCustomText ? '<span class="badge badge-pending">custom</span>' : '<span class="cell-mute">—</span>'}</td>
-      <td>${limit}</td>
-      <td>
+      <td data-label="Интервал">${interval}</td>
+      <td data-label="Текст">${hasCustomText ? '<span class="badge badge-pending">custom</span>' : '<span class="cell-mute">—</span>'}</td>
+      <td data-label="Отправлено">${limit}</td>
+      <td data-label="Действия" class="td-actions">
         <button class="ra" data-act="cfg" title="Настройки чата">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
         </button>
@@ -1481,9 +1910,9 @@ async function refreshSources() {
     }
     body.innerHTML = channels.map((ch) => `
       <tr data-cid="${escapeHtml(ch.channelId)}">
-        <td><span class="cell-strong">${escapeHtml(ch.title)}</span></td>
-        <td><span class="mono cell-dim">${escapeHtml(ch.channelId)}</span></td>
-        <td>
+        <td data-label="Канал"><span class="cell-strong">${escapeHtml(ch.title)}</span></td>
+        <td data-label="ID"><span class="mono cell-dim">${escapeHtml(ch.channelId)}</span></td>
+        <td data-label="Назначить" class="td-actions">
           <div class="row-actions">
             ${inChatMode
               ? `<button class="ra" data-src="chat" data-cid="${escapeHtml(ch.channelId)}" title="Источник для чата">чат</button>`
@@ -1674,6 +2103,13 @@ function bindSettingsAndSources() {
     loadSettingsForm();
   });
   document.getElementById("settingsForm")?.addEventListener("submit", saveSettingsForm);
+  document.getElementById("settingsProxyCheck")?.addEventListener("click", () => {
+    const f = document.getElementById("settingsForm");
+    const input = f?.elements?.proxy;
+    const result = document.getElementById("settingsProxyResult");
+    const { botId } = settingsTarget();
+    runProxyCheck(input, result, botId);
+  });
 
   document.getElementById("sourcesBotSelect")?.addEventListener("change", (e) => {
     STATE.sourcesBotId = e.target.value;
@@ -1820,6 +2256,32 @@ function bindFilters() {
   });
 }
 
+function setSidebarOpen(open) {
+  document.body.classList.toggle("sidebar-open", open);
+  const btn = document.getElementById("menuBtn");
+  const backdrop = document.getElementById("sidebarBackdrop");
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (backdrop) {
+    backdrop.hidden = !open;
+    backdrop.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+}
+
+function bindMobileNav() {
+  document.getElementById("menuBtn")?.addEventListener("click", () => {
+    setSidebarOpen(!document.body.classList.contains("sidebar-open"));
+  });
+  document.getElementById("sidebarBackdrop")?.addEventListener("click", () => setSidebarOpen(false));
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 900) setSidebarOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("sidebar-open")) {
+      setSidebarOpen(false);
+    }
+  });
+}
+
 function bindNav() {
   document.querySelectorAll(".nav-item").forEach((a) => {
     a.addEventListener("click", (e) => {
@@ -1828,6 +2290,7 @@ function bindNav() {
       const v = a.dataset.page;
       if (VIEW_META[v]) {
         switchView(v);
+        setSidebarOpen(false);
       } else {
         toast("Раздел в разработке", "info");
       }
@@ -1913,6 +2376,7 @@ async function refreshAccounts(force = false) {
   try {
     await fetchAllOverviews();
     renderAccountsTable();
+    renderSessionStatusList();
     updateChatsAccountFilterOptions();
   } catch (e) {
     if (force) toastErr(e);
@@ -2139,7 +2603,7 @@ function renderServersTable() {
       : '<span class="chip off">offline</span>';
     return `
       <tr data-id="${escapeHtml(s.id)}">
-        <td>
+        <td data-label="Сервер">
           <div class="course-cell">
             <div class="course-thumb account-thumb">${escapeHtml(initials)}</div>
             <div class="account-meta">
@@ -2148,14 +2612,14 @@ function renderServersTable() {
             </div>
           </div>
         </td>
-        <td>${serverStatusBadge(s)} ${reach}${s.lastError ? `<div class="cell-mute mono" style="margin-top:4px; font-size: 11px;" title="${escapeHtml(s.lastError)}">${escapeHtml(s.lastError.slice(0, 60))}</div>` : ""}</td>
-        <td>
+        <td data-label="Статус">${serverStatusBadge(s)} ${reach}${s.lastError ? `<div class="cell-mute mono" style="margin-top:4px; font-size: 11px;" title="${escapeHtml(s.lastError)}">${escapeHtml(s.lastError.slice(0, 60))}</div>` : ""}</td>
+        <td data-label="Установлен">
           <span class="mono cell-dim">${escapeHtml(s.installDir)}</span>
           ${s.status !== "new" ? `<div style="margin-top:4px;"><a href="${apiUrl}" target="_blank" class="cell-dim" style="font-size: 11px; text-decoration: underline;">API :${s.apiPort}</a></div>` : ""}
         </td>
-        <td>${fmtRelTime(s.lastDeployAt)}</td>
-        <td>${s.hasSshKey ? '<span class="chip on">key</span>' : '<span class="cell-mute">—</span>'}</td>
-        <td>${serverRowActions(s)}</td>
+        <td data-label="Деплой">${fmtRelTime(s.lastDeployAt)}</td>
+        <td data-label="Ключ">${s.hasSshKey ? '<span class="chip on">key</span>' : '<span class="cell-mute">—</span>'}</td>
+        <td data-label="Действия" class="td-actions">${serverRowActions(s)}</td>
       </tr>
     `;
   }).join("");
@@ -2490,6 +2954,7 @@ async function init() {
   }
 
   bindNav();
+  bindMobileNav();
   bindFilters();
   bindTable();
   bindChatsTable();
@@ -2497,6 +2962,8 @@ async function init() {
   bindModal();
   bindBotSelect();
   bindSettingsAndSources();
+  bindBulkActions();
+  bindSessionManager();
   document.getElementById("addServerBtn")?.addEventListener("click", openAddServerModal);
 
   try {

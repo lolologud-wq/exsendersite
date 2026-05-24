@@ -237,6 +237,17 @@ def build_app(service: BotService, token: str) -> FastAPI:
             raise HTTPException(status_code=413, detail="файл слишком большой")
         return await service.upload_session(slot_id, data, proxy=proxy or None)
 
+    @app.get("/api/local/activity", dependencies=[Depends(require_token)])
+    async def get_activity(
+        days: int = 14,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        return service.get_activity(days=days, account_key=account or None)
+
+    @app.post("/api/local/proxy/check", dependencies=[Depends(require_token)])
+    async def proxy_check(payload: dict[str, Any]) -> dict[str, Any]:
+        return await service.check_proxy(str((payload or {}).get("proxy", "")))
+
     return app
 
 

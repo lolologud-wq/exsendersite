@@ -22,6 +22,7 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 import health
+import activity
 from control_bot import (
     _ACC_ID_RE,
     _delete_session_files,
@@ -766,3 +767,46 @@ class BotService:
             "authorized": False,
             "hint": ".session принят, но Telethon не подтвердил авторизацию — возможно, файл от другого API_ID.",
         }
+
+    # ============================================================ activity / proxy
+    def get_activity(self, days: int = 14, account_key: Optional[str] = None) -> dict[str, Any]:
+        return activity.get_activity(days=days, account_key=account_key or None)
+
+    async def check_proxy(self, proxy_raw: Optional[str]) -> dict[str, Any]:
+        import httpx
+        from proxy_util import proxy_url_for_httpx
+
+        raw = (proxy_raw or "").strip()
+        if not raw or raw == "-":
+            return {
+                "ok": True,
+                "direct": True,
+                "message": "Без прокси — прямое подключение",
+            }
+        if not parse_proxy(raw):
+            raise ServiceError(
+                "Неверный формат. Примеры: login:pass@host:port, host:port, socks5://…"
+            )
+        url = proxy_url_for_httpx(raw)
+        t0 = _time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                proxy=url, timeout=20.0, follow_redirects=True
+            ) as client:
+                r = await client.get("https://api.telegram.org")
+            ms = int((_time.perf_counter() - t0) * 1000)
+            ok = r.status_code < 500
+            return {
+                "ok": ok,
+                "status": r.status_code,
+                "latencyMs": ms,
+                "message": f"Прокси отвечает (HTTP {r.status_code}, {ms} ms)",
+            }
+        except Exception as e:
+            ms = int((_time.perf_counter() - t0) * 1000)
+            return {
+                "ok": False,
+                "latencyMs": ms,
+                "error": str(e)[:200],
+                "message": f"Прокси недоступен: {e}",
+            }

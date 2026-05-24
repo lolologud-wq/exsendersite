@@ -12,6 +12,8 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+import activity
+
 _state: dict[str, dict[str, Any]] = {}
 
 
@@ -33,6 +35,10 @@ def note_send(account_key: str, chat_id: Optional[int] = None) -> None:
     s = _slot(account_key)
     s["lastSendAt"] = time.time()
     s["sendsTotal"] += 1
+    try:
+        activity.record_send(account_key)
+    except Exception:
+        pass
 
 
 def note_error(
