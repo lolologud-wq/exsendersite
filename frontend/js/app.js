@@ -10,7 +10,8 @@ const EMPTY_OVERVIEW = {
   totals: {
     accounts: 0, running: 0, connected: 0, authorized: 0,
     healthy: 0, dead: 0, chats: 0, chatsEnabled: 0,
-    messages: 0, withProxy: 0, withSource: 0,
+    messages: 0, messagesQuota: 0, messagesRemaining: 0,
+    withProxy: 0, withSource: 0,
   },
   accounts: [],
 };
@@ -333,6 +334,28 @@ function overviewMessagesTotal(ov) {
   return Math.max(fromTotals, fromAccounts);
 }
 
+function overviewMessageQuota(ov) {
+  const t = ov?.totals || {};
+  let quota = Number(t.messagesQuota) || 0;
+  let remaining = Number(t.messagesRemaining) || 0;
+  if (!quota && Array.isArray(ov?.accounts)) {
+    for (const a of ov.accounts) {
+      quota += Number(a.messagesQuota) || 0;
+      remaining += Number(a.messagesRemaining) || 0;
+    }
+  }
+  const sentInQuota = quota > 0 ? Math.max(0, quota - remaining) : 0;
+  return {
+    sent: sentInQuota,
+    remaining,
+    quota,
+    totalSent: overviewMessagesTotal(ov),
+  };
+}
+
+const RING_RADIUS = 42;
+const RING_CIRC = 2 * Math.PI * RING_RADIUS;
+
 function renderStats(ov) {
   const t = ov.totals;
   document.getElementById("statRunning").textContent     = fmtNumber(t.healthy ?? t.running);
@@ -406,12 +429,113 @@ function renderRing(enabled, total) {
   const cap    = document.getElementById("ringCaption");
   if (!ringFg || !label) return;
   const pct = total > 0 ? Math.round((enabled / total) * 100) : 0;
-  const circumference = 2 * Math.PI * 42;
-  const offset = circumference * (1 - pct / 100);
-  ringFg.setAttribute("stroke-dasharray", String(circumference));
+  const offset = RING_CIRC * (1 - pct / 100);
+  ringFg.setAttribute("stroke-dasharray", `${RING_CIRC} ${RING_CIRC}`);
   ringFg.setAttribute("stroke-dashoffset", String(offset));
+  ringFg.style.opacity = total > 0 ? "1" : "0.35";
   label.textContent = `${pct}%`;
-  cap.textContent = `${fmtNumber(enabled)} / ${fmtNumber(total)} ${pluralRu(total, ["чат", "чата", "чатов"])}`;
+  if (cap) {
+    cap.textContent = `${fmtNumber(enabled)} / ${fmtNumber(total)} ${pluralRu(total, ["чат", "чата", "чатов"])}`;
+  }
+}
+
+function pieSlicePath(cx, cy, r, startDeg, endDeg) {
+  const toRad = (deg) => ((deg - 90) * Math.PI) / 180;
+  const sweep = endDeg - startDeg;
+  if (sweep >= 359.99) {
+    return `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx - 0.001} ${cy - r} Z`;
+  }
+  const x1 = cx + r * Math.cos(toRad(startDeg));
+  const y1 = cy + r * Math.sin(toRad(startDeg));
+  const x2 = cx + r * Math.cos(toRad(endDeg));
+  const y2 = cy + r * Math.sin(toRad(endDeg));
+  const large = sweep > 180 ? 1 : 0;
+  return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
+}
+
+function renderPieSvg(segments, opts = {}) {
+  const cx = 50;
+  const cy = 50;
+  const r = 42;
+  const hole = 26;
+  let angle = 0;
+  const total = segments.reduce((s, seg) => s + Math.max(0, Number(seg.value) || 0), 0) || 1;
+  const paths = segments
+    .filter((seg) => Number(seg.value) > 0)
+    .map((seg) => {
+      const val = Number(seg.value) || 0;
+      const start = angle;
+      const end = angle + (val / total) * 360;
+      angle = end;
+      return `<path class="${seg.cls}" d="${pieSlicePath(cx, cy, r, start, end)}"></path>`;
+    })
+    .join("");
+  const holeCircle = opts.donut
+    ? `<circle cx="${cx}" cy="${cy}" r="${hole}" class="pie-hole"></circle>`
+    : "";
+  const center = opts.center
+    ? `<text x="${cx}" y="${opts.sub ? cy - 1 : cy + 4}" class="pie-center">${escapeHtml(opts.center)}</text>${
+        opts.sub ? `<text x="${cx}" y="${cy + 12}" class="pie-center-sub">${escapeHtml(opts.sub)}</text>` : ""
+      }`
+    : "";
+  return `<svg viewBox="0 0 100 100" class="pie-svg" aria-hidden="true">${paths}${holeCircle}${center}</svg>`;
+}
+
+function renderMessagesPie(ov) {
+  const host = document.getElementById("messagesPieHost");
+  const emptyEl = document.getElementById("messagesPieEmpty");
+  const legend = document.getElementById("messagesPieLegend");
+  if (!host) return;
+
+  const { sent, remaining, quota, totalSent } = overviewMessageQuota(ov);
+
+  if (quota <= 0) {
+    host.hidden = false;
+    if (emptyEl) emptyEl.hidden = true;
+    if (legend) legend.textContent = `отправлено: ${fmtNumber(totalSent)} · лимиты не заданы`;
+    host.innerHTML = `
+      ${renderPieSvg(
+        [{ value: totalSent || 1, cls: "pie-sent" }],
+        { donut: true, center: fmtNumber(totalSent), sub: "без лимита" },
+      )}
+      <div class="pie-legend">
+        <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(totalSent)}</b></div>
+        <div class="pie-legend-item cell-dim">Задайте лимит в настройках чата для «осталось»</div>
+      </div>`;
+    return;
+  }
+
+  const total = sent + remaining;
+  if (total <= 0) {
+    host.hidden = true;
+    host.innerHTML = "";
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = "Нет данных по лимитам";
+    }
+    if (legend) legend.textContent = "—";
+    return;
+  }
+
+  host.hidden = false;
+  if (emptyEl) emptyEl.hidden = true;
+
+  const sentPct = Math.round((sent / total) * 100);
+  const remPct = Math.max(0, 100 - sentPct);
+  if (legend) legend.textContent = `${sentPct}% отправлено · ${remPct}% осталось`;
+
+  host.innerHTML = `
+    ${renderPieSvg(
+      [
+        { value: sent, cls: "pie-sent" },
+        { value: remaining, cls: "pie-unsent" },
+      ],
+      { donut: true, center: `${sentPct}%`, sub: `${fmtNumber(sent)}/${fmtNumber(total)}` },
+    )}
+    <div class="pie-legend">
+      <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(sent)}</b></div>
+      <div class="pie-legend-item"><span class="pie-dot unsent"></span>Не отправлено <b>${fmtNumber(remaining)}</b></div>
+    </div>`;
 }
 
 // =======================================================
@@ -1823,6 +1947,7 @@ async function refresh(force = false) {
     renderSidebarStatus(data);
     renderActiveCard(data);
     renderChart(data.accounts || []);
+    renderMessagesPie(data);
   } catch (e) {
     console.error("render error:", e);
   }

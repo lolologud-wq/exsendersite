@@ -156,6 +156,16 @@ class BotService:
 
         enabled = sum(1 for c in chats if c.get("enabled"))
         messages = sum(int(c.get("messages_sent") or 0) for c in chats)
+        messages_quota = 0
+        messages_remaining = 0
+        for c in chats:
+            lim = c.get("message_limit")
+            if lim is None:
+                continue
+            lim_i = int(lim)
+            sent_i = int(c.get("messages_sent") or 0)
+            messages_quota += lim_i
+            messages_remaining += max(0, lim_i - sent_i)
         snap = health.snapshot(aid)
         if snap:
             session_total = int(snap.get("sendsTotal") or 0)
@@ -202,6 +212,8 @@ class BotService:
                 "withCustomSource": with_custom_source,
             },
             "messagesSent": messages,
+            "messagesQuota": messages_quota,
+            "messagesRemaining": messages_remaining,
         }
 
     async def overview(self) -> dict[str, Any]:
@@ -230,6 +242,8 @@ class BotService:
             "chats": sum(a["chats"]["total"] for a in accounts),
             "chatsEnabled": sum(a["chats"]["enabled"] for a in accounts),
             "messages": sum(a["messagesSent"] for a in accounts),
+            "messagesQuota": sum(a["messagesQuota"] for a in accounts),
+            "messagesRemaining": sum(a["messagesRemaining"] for a in accounts),
             "withProxy": sum(1 for a in accounts if a["hasProxy"]),
             "withSource": sum(
                 1 for a in accounts if a["globalSourceChannelId"] is not None

@@ -18,10 +18,14 @@ $Tmp = Join-Path $env:TEMP "exsender-site.tar.gz"
 
 Write-Host "==> Packing site from $Root"
 
+if (-not (Test-Path (Join-Path $Root "bot\requirements.txt"))) {
+    throw "bot/requirements.txt not found - run from exsenderV2 repo root"
+}
+
 $tarArgs = @(
     "-czf", $Tmp,
     "-C", $Root,
-    "web", "frontend", "deploy/site"
+    "web", "frontend", "bot", "deploy/site"
 )
 
 & tar @tarArgs
@@ -40,7 +44,8 @@ Write-Host "==> Upload to $remote"
 if ($LASTEXITCODE -ne 0) { throw "scp failed" }
 
 Write-Host "==> Install on server (nginx + systemd + certbot)"
-& ssh @sshArgs $remote "chmod +x /tmp/install-on-server.sh && bash /tmp/install-on-server.sh $Domain /tmp/exsender-site.tar.gz"
+$installCmd = "chmod +x /tmp/install-on-server.sh; bash /tmp/install-on-server.sh $Domain /tmp/exsender-site.tar.gz"
+& ssh @sshArgs $remote $installCmd
 
 Write-Host ""
 Write-Host "Done. Open https://$Domain/login"

@@ -122,7 +122,17 @@ def _ensure_deploy_key() -> str:
 
 
 def _build_bot_tarball() -> bytes:
+    if not BOT_DIR.is_dir():
+        raise RuntimeError(
+            f"Папка bot/ не найдена на сервере сайта ({BOT_DIR}). "
+            "Залей bot/ рядом с web/ или запусти scripts/sync-site-bot.ps1."
+        )
+    req = BOT_DIR / "requirements.txt"
+    if not req.is_file():
+        raise RuntimeError(f"Нет {req} — неполный bot/ на сервере сайта.")
+
     buf = io.BytesIO()
+    n_files = 0
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for root, dirs, files in os.walk(BOT_DIR):
             dirs[:] = [d for d in dirs if d not in EXCLUDE_NAMES]
@@ -135,7 +145,13 @@ def _build_bot_tarball() -> bytes:
                 full = os.path.join(root, f)
                 arc = ("bot/" + f) if rel == "." else ("bot/" + rel.replace("\\", "/") + "/" + f)
                 tar.add(full, arcname=arc, recursive=False)
-    return buf.getvalue()
+                n_files += 1
+    data = buf.getvalue()
+    if n_files == 0 or len(data) < 512:
+        raise RuntimeError(
+            f"Пустой архив bot/ ({n_files} файлов). Проверь {BOT_DIR} на сервере exsender."
+        )
+    return data
 
 
 def _build_env_file(env: dict[str, str]) -> str:
