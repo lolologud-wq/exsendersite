@@ -8,7 +8,7 @@
       const r = await fetch("/api/auth/me", { credentials: "same-origin" });
       const data = await r.json();
       if (data.user) {
-        window.location.replace("/");
+        window.location.replace(data.kind === "admin" ? "/admin" : "/app");
       }
     } catch (_) {
       /* ignore */
@@ -25,22 +25,23 @@
     const password = document.getElementById("password").value;
 
     try {
-      const r = await fetch("/api/auth/login", {
+      const r = await secureFetch("/api/auth/login", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login, password }),
       });
 
+      const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        window.location.replace("/");
+        window.location.replace(data.redirect || "/app");
         return;
       }
-
-      const data = await r.json().catch(() => ({}));
       errEl.textContent = data.detail === "bad credentials"
-        ? "Неверный логин или пароль"
-        : (data.detail || data.error || "Ошибка входа");
+        ? "Неверный email или пароль"
+        : data.detail === "csrf validation failed"
+          ? "Ошибка безопасности — обновите страницу (F5) и попробуйте снова"
+          : (data.detail || data.error || "Ошибка входа");
       errEl.hidden = false;
     } catch (_) {
       errEl.textContent = "Сервер недоступен";
@@ -51,4 +52,5 @@
   });
 
   checkSession();
+  ensureCsrf().catch(() => {});
 })();

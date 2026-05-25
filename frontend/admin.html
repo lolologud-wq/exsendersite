@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>exsender · Админ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/profile.css" />
+  <link rel="stylesheet" href="css/admin.css" />
+</head>
+<body class="pf-body adm-body">
+
+<header class="pf-topbar">
+  <div class="pf-container pf-topbar-inner">
+    <a href="/" class="pf-brand">
+      <span class="logo-mark">e</span>
+      <span>exsender</span>
+    </a>
+    <nav class="pf-topnav">
+      <a href="/admin" class="active">Админ</a>
+      <a href="/app">Панель</a>
+    </nav>
+    <div class="pf-top-actions">
+      <span class="pf-user" id="admUser">—</span>
+      <button class="btn-ghost" id="admLogoutBtn">Выйти</button>
+    </div>
+  </div>
+</header>
+
+<main class="pf-main">
+  <div class="pf-container adm-container">
+
+    <div class="adm-head">
+      <div>
+        <div class="pf-eyebrow">Админ-панель</div>
+        <h1 class="adm-title">Статистика и управление</h1>
+      </div>
+      <button class="btn-ghost" id="admRefreshBtn">↻ Обновить</button>
+    </div>
+
+    <section class="adm-alert" id="admAlert" hidden></section>
+    <section class="adm-alert adm-alert-ok" id="admOk" hidden></section>
+
+    <section class="adm-stats" id="admStats">
+      <article class="adm-stat"><span class="adm-stat-label">Выручка всего</span><b class="adm-stat-value" id="statRevenueTotal">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">За 30 дней</span><b class="adm-stat-value" id="statRevenueMonth">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">Оплачено</span><b class="adm-stat-value" id="statInvoicesPaid">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">Ожидают</span><b class="adm-stat-value" id="statInvoicesPending">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">Пользователей</span><b class="adm-stat-value" id="statUsersTotal">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">Активных подписок</span><b class="adm-stat-value" id="statUsersActive">—</b></article>
+      <article class="adm-stat"><span class="adm-stat-label">Регистраций / 30 дн</span><b class="adm-stat-value" id="statUsersMonth">—</b></article>
+      <article class="adm-stat adm-stat-status"><span class="adm-stat-label">Crypto Bot</span><b class="adm-stat-value" id="statCrypto">—</b></article>
+    </section>
+
+    <section class="pf-section adm-rev-section">
+      <div class="adm-rev-card" id="admChart"></div>
+    </section>
+
+    <section class="pf-section adm-tools">
+      <h2 class="pf-h2">Ручная выдача подписки</h2>
+      <form class="adm-form" id="admGrantForm">
+        <input class="input" id="grantEmail" placeholder="Email пользователя" required />
+        <select class="input" id="grantPlan">
+          <option value="week">Week · 7 дн.</option>
+          <option value="month" selected>Month · 30 дн.</option>
+          <option value="quarter">Quarter · 90 дн.</option>
+        </select>
+        <input class="input" id="grantDays" type="number" min="1" placeholder="Дней (опц.)" />
+        <button type="submit" class="btn-primary">Выдать / продлить</button>
+      </form>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">Промокоды и рефералы</h2>
+      <p class="pf-sub">Скидка % и бонусные дни. У каждого юзера свой код — виден в профиле.</p>
+      <form class="adm-form" id="admPromoForm">
+        <input class="input" id="promoCode" placeholder="Код (SAVE10)" required />
+        <input class="input" id="promoDiscount" type="number" min="0" max="100" placeholder="Скидка %" />
+        <input class="input" id="promoBonusDays" type="number" min="0" placeholder="Бонус дней" />
+        <input class="input" id="promoMaxUses" type="number" min="0" placeholder="Лимит (0=∞)" />
+        <input class="input" id="promoNote" placeholder="Заметка" />
+        <button type="submit" class="btn-primary">Создать</button>
+      </form>
+      <div class="adm-table-wrap adm-mt">
+        <table class="adm-table">
+          <thead><tr><th>Код</th><th>Скидка</th><th>Бонус</th><th>Uses</th><th></th></tr></thead>
+          <tbody id="admPromosBody"><tr><td colspan="5" class="adm-empty">—</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">Массовые уведомления</h2>
+      <form class="adm-form adm-form-col" id="admNotifyForm">
+        <input class="input" id="notifyTitle" placeholder="Заголовок" value="exsender" />
+        <textarea class="input" id="notifyMessage" rows="3" placeholder="Текст для клиентов…" required></textarea>
+        <input class="input" id="notifyEmails" placeholder="Email через запятую (пусто = всем)" />
+        <button type="submit" class="btn-primary">Отправить</button>
+      </form>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">Пользователи</h2>
+      <div class="adm-table-wrap">
+        <table class="adm-table">
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Реф. код</th>
+              <th>План</th>
+              <th>До</th>
+              <th>Статус</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="admUsersBody"><tr><td colspan="6" class="adm-empty">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">Последние оплаты</h2>
+      <div class="adm-table-wrap">
+        <table class="adm-table">
+          <thead><tr><th>Дата</th><th>Email</th><th>Тариф</th><th>Сумма</th></tr></thead>
+          <tbody id="admPaymentsBody"><tr><td colspan="4" class="adm-empty">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">Журнал действий админов</h2>
+      <div class="adm-table-wrap">
+        <table class="adm-table">
+          <thead><tr><th>Время</th><th>Админ</th><th>Действие</th><th>Цель</th><th>Детали</th></tr></thead>
+          <tbody id="admAuditBody"><tr><td colspan="5" class="adm-empty">—</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+  <script src="js/http.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

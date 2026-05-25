@@ -1,0 +1,283 @@
+.adm-container { max-width: 1100px; }
+
+.adm-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+.adm-title {
+  font-size: 28px;
+  font-weight: 800;
+  margin: 4px 0 0;
+  letter-spacing: -0.02em;
+}
+
+.adm-alert {
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+.adm-alert-err {
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  color: #fca5a5;
+}
+
+.adm-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.adm-stat {
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.adm-stat-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.adm-stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.adm-stat-status .adm-stat-value {
+  font-size: 15px;
+}
+
+.adm-plans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 12px 16px;
+  margin-bottom: 28px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-size: 14px;
+  color: var(--text-dim);
+}
+.adm-plans b { color: var(--text); }
+
+.adm-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.adm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.adm-table th,
+.adm-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.adm-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.adm-table tbody tr:last-child td { border-bottom: none; }
+.adm-empty {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 24px !important;
+}
+
+.adm-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.adm-pill-ok {
+  background: rgba(74, 222, 128, 0.12);
+  color: #86efac;
+}
+.adm-pill-off {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+}
+
+.adm-roadmap-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.adm-roadmap-list li {
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+.adm-alert-ok {
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  color: #86efac;
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.adm-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 160px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+}
+
+/* Revenue fintech chart */
+.adm-rev-section { margin-bottom: 28px; }
+.adm-rev-card {
+  background: linear-gradient(165deg, #101010 0%, #080808 55%, #050505 100%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 20px;
+  padding: 22px 22px 16px;
+  overflow: hidden;
+  position: relative;
+}
+.adm-rev-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 70% 50% at 85% 0%, rgba(110, 231, 183, 0.07), transparent 60%);
+  pointer-events: none;
+}
+.adm-rev-head {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 8px;
+}
+.adm-rev-period {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  letter-spacing: 0.02em;
+}
+.adm-rev-metric {
+  margin: 6px 0 8px;
+  font-size: clamp(28px, 4vw, 38px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.adm-rev-metric.pos { color: #6ee7b7; }
+.adm-rev-metric.neg { color: #fca5a5; }
+.adm-rev-metric.neu { color: #f5f5f5; }
+.adm-rev-sub {
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.45);
+  max-width: 520px;
+}
+.adm-rev-svg-wrap {
+  position: relative;
+  z-index: 1;
+  margin-top: 12px;
+}
+.adm-rev-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+.adm-rev-empty {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  padding: 48px 16px;
+  font-size: 14px;
+}
+.adm-rev-tooltip {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  margin-top: -10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 12px;
+  color: #f5f5f5;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.adm-rev-tooltip.on { opacity: 1; }
+.adm-rev-tooltip b { color: #6ee7b7; font-weight: 700; }
+
+.adm-chart-col {
+  flex: 1;
+  min-width: 22px;
+  max-width: 36px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.adm-chart-bar {
+  width: 100%;
+  background: linear-gradient(180deg, #f5f5f5, #737373);
+  border-radius: 3px 3px 0 0;
+  min-height: 3px;
+  flex-shrink: 0;
+}
+.adm-chart-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  max-height: 36px;
+}
+
+.adm-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.adm-form-col { flex-direction: column; align-items: stretch; }
+.adm-form .input { flex: 1; min-width: 120px; }
+.adm-form-col .input { width: 100%; }
+.adm-mt { margin-top: 12px; }
+
+.adm-actions { white-space: nowrap; }
+.adm-btn-sm { padding: 4px 10px !important; font-size: 12px !important; }
+.adm-details { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-dim); }
+
+.adm-pill-block {
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
+}
+
+@media (max-width: 640px) {
+  .adm-stats { grid-template-columns: repeat(2, 1fr); }
+  .adm-stat-value { font-size: 18px; }
+}

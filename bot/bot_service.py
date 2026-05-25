@@ -13,6 +13,7 @@ Includes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time as _time
@@ -69,6 +70,10 @@ def _coerce_float(v: Any, field: str) -> float:
         return float(v)
     except (TypeError, ValueError) as e:
         raise ServiceError(f"{field}: ожидается число") from e
+
+
+def _bump_interval_seq(state: RuntimeState) -> None:
+    state.interval_seq = int(getattr(state, "interval_seq", 0) or 0) + 1
 
 
 def _normalize_proxy(raw: Any) -> Optional[str]:
@@ -149,6 +154,27 @@ class BotService:
         # Multi-step Telethon auth state per slot:
         #   {aid: {"phone": str, "hash": str, "client": TelegramClient}}
         self._pending_auth: dict[str, dict[str, Any]] = {}
+        self._dialogs_cache: dict[str, tuple[float, list[tuple[int, str]]]] = {}
+        self._dialogs_locks: dict[str, asyncio.Lock] = {}
+
+    _DIALOGS_CACHE_TTL_SEC = 120.0
+
+    async def _get_group_chats_cached(
+        self, slot_id: str, client: TelegramClient, *, force: bool = False
+    ) -> list[tuple[int, str]]:
+        lock = self._dialogs_locks.setdefault(slot_id, asyncio.Lock())
+        async with lock:
+            now = _time.monotonic()
+            cached = self._dialogs_cache.get(slot_id)
+            if (
+                not force
+                and cached is not None
+                and now - float(cached[0]) < self._DIALOGS_CACHE_TTL_SEC
+            ):
+                return cached[1]
+            rows = await list_group_chats(client)
+            self._dialogs_cache[slot_id] = (now, rows)
+            return rows
 
     # =================================================================== read
     def _summarize_account(self, aid: str, acc: RuntimeState) -> dict[str, Any]:
@@ -168,10 +194,12 @@ class BotService:
             messages_quota += lim_i
             messages_remaining += max(0, lim_i - sent_i)
         snap = health.snapshot(aid)
+        errors_total = int(getattr(acc, "errors_total", 0) or 0)
         if snap:
             session_total = int(snap.get("sendsTotal") or 0)
             if session_total > messages:
                 messages = session_total
+            errors_total = max(errors_total, int(snap.get("errorsTotal") or 0))
         with_limit = sum(1 for c in chats if c.get("message_limit") is not None)
         with_custom_interval = sum(
             1 for c in chats if c.get("custom_interval_min") is not None
@@ -215,6 +243,7 @@ class BotService:
             "messagesSent": messages,
             "messagesQuota": messages_quota,
             "messagesRemaining": messages_remaining,
+            "errorsTotal": errors_total,
         }
 
     async def overview(self) -> dict[str, Any]:
@@ -245,6 +274,7 @@ class BotService:
             "messages": sum(a["messagesSent"] for a in accounts),
             "messagesQuota": sum(a["messagesQuota"] for a in accounts),
             "messagesRemaining": sum(a["messagesRemaining"] for a in accounts),
+            "errors": sum(a.get("errorsTotal", 0) for a in accounts),
             "withProxy": sum(1 for a in accounts if a["hasProxy"]),
             "withSource": sum(
                 1 for a in accounts if a["globalSourceChannelId"] is not None
@@ -311,14 +341,16 @@ class BotService:
             "startDelayMin": cfg.start_delay_min,
         }
 
-    async def list_account_dialogs(self, slot_id: str) -> list[dict[str, Any]]:
+    async def list_account_dialogs(
+        self, slot_id: str, *, force: bool = False
+    ) -> list[dict[str, Any]]:
         """Telegram group dialogs merged with slot chat_configs."""
         state = self._require_account(slot_id)
         client = await self._ensure_client(slot_id)
         if not await _telethon_ready(client):
             raise ServiceError("Аккаунт не авторизован в Telegram", status=400)
         try:
-            rows = await list_group_chats(client)
+            rows = await self._get_group_chats_cached(slot_id, client, force=force)
         except Exception as e:
             raise ServiceError(f"Не удалось получить диалоги: {e}") from e
 
@@ -401,11 +433,13 @@ class BotService:
             if iv_f <= 0:
                 raise ServiceError("intervalMin: должен быть > 0")
             state.default_interval_min = iv_f
+            _bump_interval_seq(state)
         if (jt := payload.get("intervalJitter")) is not None:
             try:
                 state.default_interval_jitter = _parse_jitter_user(str(jt))
             except Exception as e:
                 raise ServiceError(f"intervalJitter: {e}") from e
+            _bump_interval_seq(state)
         if msg := payload.get("defaultMessage"):
             state.default_message = str(msg).strip()
 
@@ -439,7 +473,7 @@ class BotService:
 
         if self.multi.active_account_id == slot_id:
             self.multi.active_account_id = (
-                self.multi.account_order[0] if self.multi.account_order else "default"
+                self.multi.account_order[0] if self.multi.account_order else ""
             )
 
         health.drop(slot_id)
@@ -462,6 +496,7 @@ class BotService:
             if iv <= 0:
                 raise ServiceError("defaultIntervalMin: должен быть > 0")
             state.default_interval_min = iv
+            _bump_interval_seq(state)
 
         if "defaultIntervalJitter" in patch or "default_interval_jitter" in patch:
             v = patch.get("defaultIntervalJitter", patch.get("default_interval_jitter"))
@@ -472,6 +507,7 @@ class BotService:
                     state.default_interval_jitter = _parse_jitter_user(str(v))
                 except Exception as e:
                     raise ServiceError(f"defaultIntervalJitter: {e}") from e
+            _bump_interval_seq(state)
 
         if "defaultMessage" in patch or "default_message" in patch:
             v = patch.get("defaultMessage", patch.get("default_message"))
@@ -518,7 +554,8 @@ class BotService:
         return {"ok": True, "spamRunning": state.spam_running}
 
     # ================================================================== chats
-    def _apply_chat_patch(self, cfg: ChatSpamConfig, patch: dict[str, Any]) -> None:
+    def _apply_chat_patch(self, cfg: ChatSpamConfig, patch: dict[str, Any]) -> bool:
+        interval_changed = False
         if "enabled" in patch:
             cfg.enabled = bool(patch["enabled"])
         if "customMessage" in patch or "custom_message" in patch:
@@ -544,6 +581,7 @@ class BotService:
                 if iv <= 0:
                     raise ServiceError("customIntervalMin: должен быть > 0")
                 cfg.custom_interval_min = iv
+            interval_changed = True
         if "customIntervalJitter" in patch or "custom_interval_jitter" in patch:
             v = patch.get("customIntervalJitter", patch.get("custom_interval_jitter"))
             if v in (None, "", "-"):
@@ -553,6 +591,14 @@ class BotService:
                     cfg.custom_interval_jitter = _parse_jitter_user(str(v))
                 except Exception as e:
                     raise ServiceError(f"customIntervalJitter: {e}") from e
+            interval_changed = True
+        if "startDelayMin" in patch or "start_delay_min" in patch:
+            v = patch.get("startDelayMin", patch.get("start_delay_min"))
+            if v in (None, "", "-"):
+                cfg.start_delay_min = None
+            else:
+                cfg.start_delay_min = _coerce_float(v, "startDelayMin")
+            interval_changed = True
         if "sourceChannelId" in patch or "source_channel_id" in patch:
             v = patch.get("sourceChannelId", patch.get("source_channel_id"))
             cfg.source_channel_id = (
@@ -577,21 +623,55 @@ class BotService:
                 cfg.messages_sent = 0
             else:
                 cfg.message_limit = _coerce_int(v, "messageLimit")
-        if "startDelayMin" in patch or "start_delay_min" in patch:
-            v = patch.get("startDelayMin", patch.get("start_delay_min"))
-            if v in (None, "", "-"):
-                cfg.start_delay_min = None
-            else:
-                cfg.start_delay_min = _coerce_float(v, "startDelayMin")
+        return interval_changed
 
     async def upsert_chat(self, slot_id: str, chat_id_raw: Any, patch: dict[str, Any]) -> dict[str, Any]:
         state = self._require_account(slot_id)
         cid = _coerce_int(chat_id_raw, "chatId")
         cfg = state.cfg(cid)
-        self._apply_chat_patch(cfg, patch)
+        if self._apply_chat_patch(cfg, patch):
+            _bump_interval_seq(state)
         state.set_cfg(cid, cfg)
         self._save()
         return {"ok": True, "chatId": str(cid), "config": cfg.to_dict()}
+
+    async def bulk_set_chats_enabled(
+        self,
+        slot_id: str,
+        enabled: bool,
+        chat_ids: list[str] | None = None,
+        *,
+        force_dialogs: bool = False,
+    ) -> dict[str, Any]:
+        """Enable or disable chats. Without chat_ids — all Telegram group dialogs."""
+        state = self._require_account(slot_id)
+        ids: set[str]
+        if chat_ids:
+            ids = {str(x) for x in chat_ids if str(x).strip()}
+        else:
+            client = await self._ensure_client(slot_id)
+            if not await _telethon_ready(client):
+                raise ServiceError("Аккаунт не авторизован в Telegram", status=400)
+            try:
+                rows = await self._get_group_chats_cached(
+                    slot_id, client, force=force_dialogs
+                )
+            except Exception as e:
+                raise ServiceError(f"Не удалось получить диалоги: {e}") from e
+            ids = {str(cid) for cid, _ in rows}
+            ids.update(str(k) for k in (state.chat_configs or {}))
+        count = 0
+        for sid in ids:
+            try:
+                cid = int(sid)
+            except ValueError:
+                continue
+            cfg = state.cfg(cid)
+            cfg.enabled = bool(enabled)
+            state.set_cfg(cid, cfg)
+            count += 1
+        self._save()
+        return {"ok": True, "count": count, "enabled": bool(enabled)}
 
     async def delete_chat(self, slot_id: str, chat_id_raw: Any) -> None:
         state = self._require_account(slot_id)

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>exsender · Регистрация</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand">
+        <a href="/" class="logo-mark">e</a>
+        <div>
+          <h1 class="login-title">Создать аккаунт</h1>
+          <p class="login-sub">Email и пароль — пара кликов до старта</p>
+        </div>
+      </div>
+
+      <form id="registerForm" class="login-form" autocomplete="on">
+        <div class="field">
+          <label class="field-label" for="email">Email</label>
+          <input class="input" id="email" name="email" type="email" required autocomplete="email" placeholder="you@example.com" />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="password">Пароль</label>
+          <input class="input" id="password" name="password" type="password" minlength="8" required autocomplete="new-password" placeholder="мин. 8 символов, буквы и цифры" />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="name">Имя <span class="field-mute">(опционально)</span></label>
+          <input class="input" id="name" name="name" type="text" maxlength="80" autocomplete="name" />
+        </div>
+
+        <div class="field hp-field" aria-hidden="true">
+          <label class="field-label" for="website">Website</label>
+          <input class="input" id="website" name="_website" type="text" tabindex="-1" autocomplete="off" />
+        </div>
+
+        <p class="login-error" id="registerError" hidden></p>
+
+        <button type="submit" class="btn-primary login-submit" id="registerBtn">
+          <span>Зарегистрироваться</span>
+        </button>
+
+        <p class="login-foot">
+          Уже есть аккаунт? <a href="/login">Войти</a>
+        </p>
+      </form>
+    </div>
+  </div>
+  <script src="js/http.js"></script>
+  <script src="js/register.js"></script>
+</body>
+</html>

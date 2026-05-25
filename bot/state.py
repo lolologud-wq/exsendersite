@@ -104,6 +104,9 @@ class RuntimeState:
     # Один источник для всех чатов, у которых в настройках чата не задан свой канал.
     global_source_channel_id: Optional[int] = None
     global_source_message_id: Optional[int] = None
+    errors_total: int = 0
+    # Bumped when interval settings change — spam_loop clears per-chat timers.
+    interval_seq: int = 0
     chat_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def cfg(self, chat_id: int) -> ChatSpamConfig:
@@ -120,13 +123,17 @@ class RuntimeState:
 class MultiAccountState:
     """Несколько userbot-аккаунтов в одном runtime_state.json."""
 
-    active_account_id: str = "default"
+    active_account_id: str = ""
     account_order: list[str] = field(default_factory=list)
     accounts: dict[str, RuntimeState] = field(default_factory=dict)
 
 
 def active_runtime_state(multi: MultiAccountState) -> RuntimeState:
-    return multi.accounts[multi.active_account_id]
+    if multi.active_account_id and multi.active_account_id in multi.accounts:
+        return multi.accounts[multi.active_account_id]
+    # Fallback: return an empty in-memory state when nothing is configured yet
+    # (e.g. a freshly-deployed VDS that hasn't had any slots added).
+    return RuntimeState()
 
 
 def _runtime_state_from_flat_dict(raw: dict[str, Any]) -> RuntimeState:
@@ -162,6 +169,8 @@ def _runtime_state_from_flat_dict(raw: dict[str, Any]) -> RuntimeState:
         default_source_forward=default_source_forward,
         global_source_channel_id=(int(gch) if gch is not None else None),
         global_source_message_id=(int(gmid) if gmid is not None else None),
+        errors_total=int(raw.get("errors_total", 0) or 0),
+        interval_seq=int(raw.get("interval_seq", 0) or 0),
         chat_configs=chat_configs,
     )
 
@@ -191,10 +200,15 @@ def _read_state_json_raw() -> dict[str, Any] | None:
 
 def load_multi_account_state() -> MultiAccountState:
     env_ids = default_account_ids_from_env()
-    if not env_ids:
-        env_ids = ["default"]
     raw = _read_state_json_raw()
     if raw is None:
+        # No state file yet and ACCOUNTS env is empty — start with zero slots.
+        if not env_ids:
+            return MultiAccountState(
+                active_account_id="",
+                account_order=[],
+                accounts={},
+            )
         return MultiAccountState(
             active_account_id=env_ids[0],
             account_order=list(env_ids),
@@ -211,7 +225,8 @@ def load_multi_account_state() -> MultiAccountState:
                 accounts[aid] = _runtime_state_from_flat_dict(v)
             else:
                 accounts[aid] = RuntimeState()
-        if not accounts:
+        # Only fall back to flat-state import if ACCOUNTS env actually requests it
+        if not accounts and env_ids:
             accounts[env_ids[0]] = _runtime_state_from_flat_dict(raw)
 
         file_order_raw = raw.get("account_order")
@@ -230,6 +245,7 @@ def load_multi_account_state() -> MultiAccountState:
                 if k not in order:
                     order.append(k)
 
+        # Auto-create only the slots explicitly listed in ACCOUNTS env
         for e in env_ids:
             if e not in accounts:
                 accounts[e] = RuntimeState()
@@ -239,13 +255,20 @@ def load_multi_account_state() -> MultiAccountState:
 
         active = str(raw.get("active_account_id") or "").strip()
         if not active or active not in accounts:
-            active = order[0] if order else next(iter(accounts))
+            active = order[0] if order else (next(iter(accounts)) if accounts else "")
         return MultiAccountState(
             active_account_id=active,
             account_order=order,
             accounts=accounts,
         )
 
+    # Legacy flat state — only import when ACCOUNTS env has at least one id
+    if not env_ids:
+        return MultiAccountState(
+            active_account_id="",
+            account_order=[],
+            accounts={},
+        )
     st = _runtime_state_from_flat_dict(raw)
     accounts = {env_ids[0]: st}
     for a in env_ids[1:]:
@@ -270,7 +293,7 @@ def save_multi_account_state(multi: MultiAccountState) -> None:
             seen.add(k)
     multi.account_order = order
     if multi.active_account_id not in multi.accounts:
-        multi.active_account_id = order[0] if order else "default"
+        multi.active_account_id = order[0] if order else ""
 
     payload = json.dumps(
         {
@@ -299,9 +322,17 @@ def save_multi_account_state(multi: MultiAccountState) -> None:
 
 
 def default_account_ids_from_env() -> list[str]:
-    raw = os.getenv("ACCOUNTS", "default").strip()
-    parts = [x.strip() for x in raw.split(",") if x.strip()]
-    return parts or ["default"]
+    """Return list of slot ids requested via ACCOUNTS env.
+
+    If ACCOUNTS is explicitly set (even to empty string) — respect it as-is.
+    If ACCOUNTS is unset at all — keep legacy behaviour with a single 'default'
+    slot to avoid breaking standalone bot.py runs.
+    """
+    raw_env = os.getenv("ACCOUNTS")
+    if raw_env is None:
+        return ["default"]
+    parts = [x.strip() for x in raw_env.split(",") if x.strip()]
+    return parts
 
 
 def load_state() -> RuntimeState:

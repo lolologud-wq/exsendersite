@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>exsender — массовая рассылка в Telegram без боли</title>
+  <meta name="description" content="exsender — облачная панель управления рассылкой в Telegram-чатах. Несколько аккаунтов, прокси, расписание, источники постов." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/landing.css" />
+</head>
+<body class="lp-body">
+
+<!-- ====================== NAV ====================== -->
+<header class="lp-nav">
+  <div class="lp-container lp-nav-inner">
+    <a href="/" class="lp-brand">
+      <span class="logo-mark">e</span>
+      <span class="lp-brand-text">exsender</span>
+    </a>
+
+    <nav class="lp-nav-links" aria-label="Разделы">
+      <a href="#features">Возможности</a>
+      <a href="#process">Как работает</a>
+      <a href="#control">Контроль</a>
+      <a href="#pricing">Тарифы</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+
+    <div class="lp-nav-cta">
+      <a class="btn-ghost" href="/login">Войти</a>
+      <a class="btn-ghost" href="/profile" id="lpNavProfile" hidden>Профиль</a>
+      <a class="btn-primary" href="/register">Начать</a>
+    </div>
+
+    <button class="lp-burger" id="lpBurger" aria-label="Меню" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="lp-mobile-menu" id="lpMobileMenu" hidden>
+    <a href="#features">Возможности</a>
+    <a href="#process">Как работает</a>
+    <a href="#control">Контроль</a>
+    <a href="#pricing">Тарифы</a>
+    <a href="#faq">FAQ</a>
+    <div class="lp-mobile-cta">
+      <a class="btn-ghost" href="/login">Войти</a>
+      <a class="btn-primary" href="/register">Начать</a>
+    </div>
+  </div>
+</header>
+
+<!-- ====================== HERO ====================== -->
+<section class="lp-hero">
+  <div class="lp-container lp-hero-grid">
+    <div class="lp-hero-text">
+      <div class="lp-eyebrow">
+        <span class="lp-dot"></span>
+        Облачная панель Telegram-рассылок
+      </div>
+      <h1 class="lp-h1">
+        Массовая рассылка в&nbsp;Telegram <span class="lp-h1-accent">без лишних ботов</span>
+      </h1>
+      <p class="lp-lead">
+        Управляй десятками userbot-аккаунтов, чатами, прокси и&nbsp;источниками постов из&nbsp;одной панели.
+        Расписания, лимиты, A/B-тексты, мониторинг — собрано в&nbsp;один контур.
+      </p>
+      <div class="lp-hero-cta">
+        <a class="btn-primary lp-btn-lg" href="/register">Получить доступ</a>
+        <a class="btn-ghost lp-btn-lg" href="#features">Что внутри</a>
+      </div>
+      <div class="lp-hero-bullets">
+        <span><b>5+</b> VDS-серверов</span>
+        <span><b>SOCKS5</b> прокси на аккаунт</span>
+        <span><b>0</b> ручных правок</span>
+      </div>
+    </div>
+
+    <div class="lp-hero-visual" aria-hidden="true">
+      <div class="lp-card-glass lp-card-main">
+        <div class="lp-card-head">
+          <span class="lp-card-title">exsender · dashboard</span>
+          <span class="lp-chip on">running</span>
+        </div>
+        <div class="lp-card-stats">
+          <div>
+            <div class="lp-stat-label">Здоровые слоты</div>
+            <div class="lp-stat-value">12<span class="lp-stat-sub">из 14</span></div>
+          </div>
+          <div>
+            <div class="lp-stat-label">Чаты вкл</div>
+            <div class="lp-stat-value">847<span class="lp-stat-sub">из 1024</span></div>
+          </div>
+          <div>
+            <div class="lp-stat-label">Отправлено</div>
+            <div class="lp-stat-value">38&nbsp;120<span class="lp-stat-sub good">+1.2k/ч</span></div>
+          </div>
+        </div>
+        <div class="lp-card-pie">
+          <svg viewBox="0 0 42 42" class="lp-pie-svg" id="lpHeroPie" aria-hidden="true">
+            <circle cx="21" cy="21" r="15.915" fill="none" stroke="#404040" stroke-width="5"/>
+            <circle cx="21" cy="21" r="15.915" fill="none" stroke="#f5f5f5" stroke-width="5"
+                    stroke-dasharray="63.1 36.9" stroke-dashoffset="0"
+                    transform="rotate(-90 21 21)"/>
+            <circle cx="21" cy="21" r="15.915" fill="none" stroke="#f87171" stroke-width="5"
+                    stroke-dasharray="1.6 98.4" stroke-dashoffset="-63.1"
+                    transform="rotate(-90 21 21)"/>
+            <circle cx="21" cy="21" r="11" fill="#121212"/>
+            <text x="21" y="23.5" text-anchor="middle" font-size="7" fill="#f5f5f5" font-weight="800">63%</text>
+          </svg>
+          <div class="lp-card-legend">
+            <div><span class="lp-dot-sq sent"></span>Отправлено <b>23 980</b></div>
+            <div><span class="lp-dot-sq err"></span>Ошибки <b>620</b></div>
+            <div><span class="lp-dot-sq rem"></span>Осталось <b>13 400</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lp-card-glass lp-card-side lp-card-side-1">
+        <div class="lp-row"><span class="lp-pill">VDS · ru-1</span><span class="lp-mono">7 слотов</span></div>
+        <div class="lp-row"><span class="lp-pill">VDS · de-2</span><span class="lp-mono">4 слота</span></div>
+        <div class="lp-row"><span class="lp-pill">VDS · nl-1</span><span class="lp-mono">3 слота</span></div>
+      </div>
+
+      <div class="lp-card-glass lp-card-side lp-card-side-2">
+        <div class="lp-mono lp-mono-sm">@channel_promo</div>
+        <div class="lp-progress"><span style="width:78%"></span></div>
+        <div class="lp-row lp-row-tight">
+          <span class="lp-tag">forward</span>
+          <span class="lp-mono-sm">интервал 6 мин</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== TRUSTED ====================== -->
+<section class="lp-strip">
+  <div class="lp-container lp-strip-inner lp-strip-stats">
+    <div class="lp-strip-stat">
+      <b>1 минута</b>
+      <span>от оплаты до запуска</span>
+    </div>
+    <span class="lp-sep"></span>
+    <div class="lp-strip-stat">
+      <b>Crypto Bot</b>
+      <span>оплата USDT в Telegram</span>
+    </div>
+    <span class="lp-sep"></span>
+    <div class="lp-strip-stat">
+      <b>Multi-VDS</b>
+      <span>несколько серверов из одной панели</span>
+    </div>
+    <span class="lp-sep"></span>
+    <div class="lp-strip-stat">
+      <b>24/7</b>
+      <span>поддержка в Telegram</span>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== FEATURES ====================== -->
+<section class="lp-section" id="features">
+  <div class="lp-container">
+    <div class="lp-section-head">
+      <span class="lp-eyebrow"><span class="lp-dot"></span>Для оператора</span>
+      <h2 class="lp-h2">Соберите рассылку как понятную схему,<br/>а&nbsp;не&nbsp;связку скриптов.</h2>
+    </div>
+
+    <div class="lp-features-grid">
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+        </div>
+        <h3>Multi-account</h3>
+        <p>Несколько Telegram-аккаунтов на VDS. Прокси на каждый слот, авто-восстановление сессий, переключение активного.</p>
+      </article>
+
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/></svg>
+        </div>
+        <h3>Управление чатами</h3>
+        <p>Авто-загрузка списка групп из Telegram, тумблер «включить все», кастомный текст, лимиты и интервалы на каждый чат.</p>
+      </article>
+
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 3v18"/></svg>
+        </div>
+        <h3>Источники постов</h3>
+        <p>Вставь t.me-ссылку — exsender сам определит канал и пост, поставит его на forward или копию.</p>
+      </article>
+
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg>
+        </div>
+        <h3>Расписание и&nbsp;Jitter</h3>
+        <p>Интервал в минутах с дисперсией. Лимиты сообщений и задержка старта — на чат и на аккаунт.</p>
+      </article>
+
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+        </div>
+        <h3>Мониторинг и&nbsp;ошибки</h3>
+        <p>Heatmap активности, дашборд по каждому VDS, тип последней ошибки на слот (FloodWait, ChatWrite, Privacy).</p>
+      </article>
+
+      <article class="lp-feature">
+        <div class="lp-feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M8 14h2M14 14h2"/></svg>
+        </div>
+        <h3>Deploy на VDS в&nbsp;один клик</h3>
+        <p>Добавил host/пароль — exsender по SSH ставит venv, бот, systemd, выдает Bot API token. Дальше — только ключ.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE TWO-COL ====================== -->
+<section class="lp-section lp-section-dark" id="control">
+  <div class="lp-container lp-two-col">
+    <div>
+      <span class="lp-eyebrow"><span class="lp-dot"></span>Контроль</span>
+      <h2 class="lp-h2">Доверие к&nbsp;изменениям там, где&nbsp;видно выполнение.</h2>
+      <ul class="lp-bullets">
+        <li><b>VDS-карта.</b> Несколько серверов сразу видны в одной шапке. Переключаешь — переключается весь дашборд.</li>
+        <li><b>Telegram-бот как пульт.</b> Тот же state из любой точки: вкл/выкл слот, посмотреть чаты, поменять источник.</li>
+        <li><b>Метрики прямо на главной.</b> Здоровые слоты, дохлые, ошибки, отправленные сообщения, прокси.</li>
+      </ul>
+    </div>
+
+    <div class="lp-mock">
+      <div class="lp-mock-window">
+        <div class="lp-mock-bar"><span></span><span></span><span></span><span class="lp-mock-url">exsender.top/app</span></div>
+        <div class="lp-mock-body">
+          <div class="lp-mock-stat-row">
+            <div class="lp-mock-stat"><span>Здоровых</span><b>12</b></div>
+            <div class="lp-mock-stat"><span>Чатов вкл</span><b>847</b></div>
+            <div class="lp-mock-stat"><span>Ошибок</span><b style="color:#f87171">620</b></div>
+            <div class="lp-mock-stat"><span>Отправлено</span><b>38 120</b></div>
+          </div>
+          <div class="lp-mock-row">
+            <span class="lp-pill">@slot_01</span>
+            <span class="lp-mono-sm">forward · 6 мин · 91/100</span>
+            <span class="lp-chip on">ok</span>
+          </div>
+          <div class="lp-mock-row">
+            <span class="lp-pill">@slot_02</span>
+            <span class="lp-mono-sm">copy · 5 мин · 47/100</span>
+            <span class="lp-chip on">ok</span>
+          </div>
+          <div class="lp-mock-row">
+            <span class="lp-pill">@slot_03</span>
+            <span class="lp-mono-sm">FloodWait · 412 сек</span>
+            <span class="lp-chip warn">wait</span>
+          </div>
+          <div class="lp-mock-row">
+            <span class="lp-pill">@slot_04</span>
+            <span class="lp-mono-sm">forward · 7 мин · 30/100</span>
+            <span class="lp-chip on">ok</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== PROCESS ====================== -->
+<section class="lp-section" id="process">
+  <div class="lp-container">
+    <div class="lp-section-head">
+      <span class="lp-eyebrow"><span class="lp-dot"></span>Процесс</span>
+      <h2 class="lp-h2">Подключили VDS. Залили сессии. Запустили. Смотрите результат.</h2>
+    </div>
+
+    <div class="lp-steps">
+      <div class="lp-step">
+        <span class="lp-step-num">01</span>
+        <h3>Connect</h3>
+        <p>Добавь VDS из UI: host, пароль, API_ID/API_HASH. Сайт сам поднимет userbot и systemd.</p>
+      </div>
+      <div class="lp-step">
+        <span class="lp-step-num">02</span>
+        <h3>Sessions</h3>
+        <p>Загрузи .session-файлы или авторизуйся по коду через панель. SOCKS5-прокси прямо в форме.</p>
+      </div>
+      <div class="lp-step">
+        <span class="lp-step-num">03</span>
+        <h3>Configure</h3>
+        <p>Включи чаты переключателем, выбери пост-источник, поставь интервалы и лимиты.</p>
+      </div>
+      <div class="lp-step">
+        <span class="lp-step-num">04</span>
+        <h3>Watch</h3>
+        <p>Главная показывает все слоты в реалтайме, heatmap активности, ошибки и квоты.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== PRICING ====================== -->
+<section class="lp-section lp-section-dark" id="pricing">
+  <div class="lp-container">
+    <div class="lp-section-head">
+      <span class="lp-eyebrow"><span class="lp-dot"></span>Тарифы</span>
+      <h2 class="lp-h2">Выбери период — оплата USDT через Crypto Bot.</h2>
+    </div>
+
+    <div class="lp-pricing">
+      <div class="lp-price">
+        <div class="lp-price-head">
+          <span class="lp-price-name">Week</span>
+          <span class="lp-price-period">7 дней</span>
+        </div>
+        <div class="lp-price-amount">$4</div>
+        <ul class="lp-price-list">
+          <li>Полный доступ к панели</li>
+          <li>Multi-account рассылка</li>
+          <li>Источники постов</li>
+          <li>Crypto Bot оплата USDT</li>
+        </ul>
+        <a class="btn-ghost lp-price-cta" href="/register?plan=week">Купить</a>
+      </div>
+
+      <div class="lp-price lp-price-pop">
+        <div class="lp-price-badge">Популярный</div>
+        <div class="lp-price-head">
+          <span class="lp-price-name">Month</span>
+          <span class="lp-price-period">30 дней</span>
+        </div>
+        <div class="lp-price-amount">$12</div>
+        <ul class="lp-price-list">
+          <li>Всё из тарифа Week</li>
+          <li>Heatmap активности</li>
+          <li>Мониторинг ошибок</li>
+          <li>Telegram-бот для управления</li>
+          <li>Поддержка в течение часа</li>
+        </ul>
+        <a class="btn-primary lp-price-cta" href="/register?plan=month">Купить</a>
+      </div>
+
+      <div class="lp-price">
+        <div class="lp-price-head">
+          <span class="lp-price-name">Quarter</span>
+          <span class="lp-price-period">90 дней</span>
+        </div>
+        <div class="lp-price-amount">$30</div>
+        <ul class="lp-price-list">
+          <li>Всё из тарифа Month</li>
+          <li>Экономия 17%</li>
+          <li>Приоритет в очереди поддержки</li>
+          <li>Помощь в первичной настройке</li>
+        </ul>
+        <a class="btn-ghost lp-price-cta" href="/register?plan=quarter">Купить</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== FAQ ====================== -->
+<section class="lp-section" id="faq">
+  <div class="lp-container lp-faq-grid">
+    <div>
+      <span class="lp-eyebrow"><span class="lp-dot"></span>FAQ</span>
+      <h2 class="lp-h2">Частые вопросы</h2>
+      <p class="lp-lead lp-lead-sm">Не нашёл ответ — пиши в Telegram, отвечаем в течение часа.</p>
+    </div>
+    <div class="lp-faq">
+      <details>
+        <summary>Где хранятся .session-файлы?</summary>
+        <p>На твоём VDS, в зашифрованной директории под systemd-юнитом. Мы не имеем доступа к сессиям — все ключи остаются у тебя.</p>
+      </details>
+      <details>
+        <summary>Что нужно, чтобы стартовать?</summary>
+        <p>VDS (можно мы поможем выбрать), API_ID и API_HASH из my.telegram.org, и список аккаунтов с прокси. Деплой занимает 2–3 минуты.</p>
+      </details>
+      <details>
+        <summary>Не забанят ли аккаунт?</summary>
+        <p>Шанс минимизирован: рандомные интервалы, jitter, лимит сообщений на чат, индивидуальные прокси. Но 100% гарантий в Telegram-рассылках не даёт никто.</p>
+      </details>
+      <details>
+        <summary>Можно платить по карте?</summary>
+        <p>Да, СБП или иностранная карта. После регистрации мы пришлём ссылку на оплату.</p>
+      </details>
+      <details>
+        <summary>Есть ли API?</summary>
+        <p>Да, каждый бот поднимает REST API с Bearer-токеном. Можно интегрировать с твоей CRM или скриптами.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== FINAL CTA ====================== -->
+<section class="lp-final">
+  <div class="lp-container lp-final-inner">
+    <h2 class="lp-h2 lp-h2-center">Откройте Telegram-рассылку<br/>как управляемую панель.</h2>
+    <div class="lp-hero-cta lp-hero-cta-center">
+      <a class="btn-primary lp-btn-lg" href="/register">Получить доступ</a>
+      <a class="btn-ghost lp-btn-lg" href="/login">У меня уже есть аккаунт</a>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== FOOTER ====================== -->
+<footer class="lp-footer">
+  <div class="lp-container lp-footer-inner">
+    <div class="lp-footer-brand">
+      <span class="logo-mark">e</span>
+      <div>
+        <div class="lp-brand-text">exsender</div>
+        <div class="lp-footer-sub">© 2026 — Massive Telegram broadcasts</div>
+      </div>
+    </div>
+    <div class="lp-footer-links">
+      <a href="#features">Возможности</a>
+      <a href="#pricing">Тарифы</a>
+      <a href="#faq">FAQ</a>
+      <a href="/login">Войти</a>
+      <a href="/register">Регистрация</a>
+    </div>
+  </div>
+</footer>
+
+<script src="js/landing.js" defer></script>
+</body>
+</html>

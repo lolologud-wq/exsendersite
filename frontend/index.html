@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#050505" />
   <title>exsender</title>
+  <base href="/" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
@@ -71,6 +72,28 @@
       </div>
 
       <div class="nav nav-bottom">
+        <a href="/admin" class="nav-item" id="navAdmin" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+          <span>Админ</span>
+        </a>
+        <a href="https://t.me/exbrute" class="nav-item" id="navSupport" target="_blank" rel="noopener noreferrer" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/>
+          </svg>
+          <span>Поддержка</span>
+        </a>
+        <a href="/profile" class="nav-item" id="navProfile" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="4"/>
+            <path d="M4 20c0-4.4 3.6-8 8-8s8 3.6 8 8"/>
+          </svg>
+          <span>Профиль</span>
+        </a>
         <a href="#" class="nav-item" data-page="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <circle cx="12" cy="12" r="3"/>
@@ -85,6 +108,10 @@
 
     <!-- ============== MAIN ============== -->
     <main class="main">
+      <div class="sub-banner" id="subBanner" hidden>
+        <span id="subBannerText">Подписка не активна.</span>
+        <a class="btn-primary sub-banner-btn" href="/profile">Оформить подписку</a>
+      </div>
       <header class="topbar">
         <div class="topbar-left">
           <button type="button" class="icon-btn menu-btn" id="menuBtn" aria-label="Меню" aria-expanded="false">
@@ -229,7 +256,7 @@
           <div class="active-grid">
             <div class="kv">
               <span class="kv-key">Статус</span>
-              <span class="kv-val" id="activeStatus">—</span>
+              <span class="kv-val kv-val--status" id="activeStatus">—</span>
             </div>
             <div class="kv">
               <span class="kv-key">Интервал</span>
@@ -244,6 +271,8 @@
               <span class="kv-val mono" id="activeSource">—</span>
             </div>
           </div>
+
+          <div class="active-error" id="activeError" hidden></div>
 
           <div class="community">
             <div class="community-info">
@@ -330,26 +359,35 @@
 
       <!-- ============================================== CHATS VIEW -->
       <div data-view="chats" hidden>
-        <section class="filter-bar">
+        <section class="filter-bar chats-filter-bar">
           <div class="date-range">
             <span class="chip" id="chatsCount">0 чатов</span>
+            <span class="chats-loading" id="chatsLoading" hidden aria-live="polite">Загрузка…</span>
+          </div>
+          <div class="chats-bulk-left">
+            <label class="switch switch-master" title="Включить / выключить все">
+              <input type="checkbox" id="chatsMasterToggle" />
+              <span></span>
+            </label>
+            <span class="bulk-count" id="chatsBulkLabel">Все чаты</span>
           </div>
         </section>
         <section class="card table-card">
           <div class="card-head">
             <h3>Чаты</h3>
           </div>
-          <div class="table-wrap table-cards">
-            <table class="purchases chats-table">
+          <div class="table-wrap table-cards chats-table-wrap">
+            <table class="purchases chats-table" id="chatsTable">
               <thead>
                 <tr>
                   <th style="width:50px">on</th>
-                  <th>VDS</th>
-                  <th>Аккаунт</th>
+                  <th class="col-vds">VDS</th>
+                  <th class="col-account">Аккаунт</th>
                   <th>Группа / Chat ID</th>
-                  <th>Интервал</th>
-                  <th>Текст</th>
-                  <th>Отправлено</th>
+                  <th class="col-interval">Интервал</th>
+                  <th class="col-text">Текст</th>
+                  <th class="col-source">Пост</th>
+                  <th class="col-sent">Отправлено</th>
                   <th style="width:50px"></th>
                 </tr>
               </thead>
@@ -416,7 +454,7 @@
         <section class="card" style="margin-top:0;">
           <div class="card-head"><h3>Настройки рассылки</h3></div>
           <form class="form-grid" id="settingsForm" style="padding: 16px;" autocomplete="off">
-            <div class="callout">Параметры по умолчанию для выбранного аккаунта. Каналы-источники — только во вкладке <b>Источники</b>.</div>
+            <div class="callout">Параметры по умолчанию для выбранного аккаунта. <b>Интервал</b> — минимальная пауза между любыми двумя отправками с этого слота. Каналы-источники — только во вкладке <b>Источники</b>.</div>
             <div id="settingsSourceHint" class="callout cell-dim">Общий источник: не задан</div>
             <label class="field">
               <span class="field-label">Стандартный текст</span>
@@ -504,6 +542,7 @@
   <!-- ============== TOAST ============== -->
   <div class="toasts" id="toasts"></div>
 
-  <script src="js/app.js?v=20260524p4"></script>
+  <script src="js/http.js"></script>
+  <script src="js/app.js?v=20260525"></script>
 </body>
 </html>

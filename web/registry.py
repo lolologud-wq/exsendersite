@@ -14,6 +14,7 @@ Schema (per bot):
   api_token   str — Bearer token to call its API (generated at deploy)
   status      new | deploying | running | stopped | error
   last_deploy_at, last_error, has_ssh_key
+  owner_id    str — user id from users.json; "" = legacy / admin-only
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "bots.json")
+from data_paths import data_file
+
+REGISTRY_PATH = str(data_file("bots.json"))
 _lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,7 @@ class BotRecord:
     last_deploy_at: Optional[float] = None
     last_error: str = ""
     has_ssh_key: bool = False
+    owner_id: str = ""
 
     def public(self) -> dict[str, Any]:
         d = asdict(self)
@@ -129,8 +133,28 @@ class BotRegistry:
     def list(self) -> list[BotRecord]:
         return list(self._cache.values())
 
+    def list_for(self, owner_id: str, *, include_legacy: bool = False) -> list[BotRecord]:
+        """Bots belonging to a customer. Legacy (owner_id='') only if include_legacy."""
+        out: list[BotRecord] = []
+        for b in self._cache.values():
+            if b.owner_id == owner_id:
+                out.append(b)
+            elif include_legacy and not b.owner_id:
+                out.append(b)
+        return out
+
     def get(self, bid: str) -> Optional[BotRecord]:
         return self._cache.get(bid)
+
+    def get_for(self, bid: str, owner_id: str, *, admin: bool = False) -> Optional[BotRecord]:
+        rec = self._cache.get(bid)
+        if rec is None:
+            return None
+        if admin:
+            return rec
+        if rec.owner_id and rec.owner_id == owner_id:
+            return rec
+        return None
 
     def add(
         self,
@@ -142,6 +166,7 @@ class BotRegistry:
         install_dir: str = "/opt/userbot",
         api_port: int = 8080,
         api_token: str = "",
+        owner_id: str = "",
     ) -> BotRecord:
         bid = uuid.uuid4().hex[:12]
         rec = BotRecord(
@@ -153,6 +178,7 @@ class BotRegistry:
             install_dir=install_dir.strip() or "/opt/userbot",
             api_port=int(api_port),
             api_token=api_token,
+            owner_id=(owner_id or "").strip(),
         )
         self._cache[bid] = rec
         self._save()

@@ -1,16 +1,26 @@
-"""Cookie-based login for the site.
+"""Cookie-based session for the site.
 
-Single operator account, credentials live in env / defaults.
-Signed cookie via itsdangerous; no DB, no user mgmt.
+Supports two identity types:
+    * admin   — operators from env (SITE_LOGIN/PASSWORD + SITE_ADMINS)
+    * user    — registered customer from users.json (UserStore)
+
+Cookie payload:
+    {"u": "<login>"}             — admin
+    {"uid": "<user_id>"}         — customer
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
-from typing import Optional
+import time
+from typing import Any, Optional
 
-from fastapi import Cookie, HTTPException, Request, Response
+from fastapi import HTTPException, Request, Response
 from itsdangerous import BadSignature, URLSafeSerializer
+
+from users import UserRecord, UserStore
 
 LOGIN = os.getenv("SITE_LOGIN", "favory")
 PASSWORD = os.getenv("SITE_PASSWORD", "gubkina2868")
@@ -28,15 +38,64 @@ def _cookie_secure() -> bool:
     pub = os.getenv("SITE_PUBLIC_URL", "").strip()
     return pub.startswith("https://")
 
+
 _serializer = URLSafeSerializer(SECRET, salt="site-login")
 
 
+def _admin_accounts() -> dict[str, str]:
+    """login -> password for all configured admin operators."""
+    admins: dict[str, str] = {}
+    if LOGIN and PASSWORD:
+        admins[LOGIN.strip()] = PASSWORD
+    raw = os.getenv("SITE_ADMINS", "").strip()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        user, _, pwd = part.partition(":")
+        user, pwd = user.strip(), pwd.strip()
+        if user and pwd:
+            admins[user] = pwd
+    return admins
+
+
+def _secret_compare(a: str, b: str) -> bool:
+    """Constant-time compare regardless of string length."""
+    return hmac.compare_digest(
+        hashlib.sha256(a.encode("utf-8")).digest(),
+        hashlib.sha256(b.encode("utf-8")).digest(),
+    )
+
+
+def admin_logins() -> set[str]:
+    return set(_admin_accounts().keys())
+
+
+def verify_admin(login: str, password: str) -> Optional[str]:
+    """Return admin login if credentials match any configured operator."""
+    login_ = (login or "").strip()
+    pwd = password or ""
+    expected = _admin_accounts().get(login_)
+    if expected is not None and _secret_compare(pwd, expected):
+        return login_
+    return None
+
+
+def check_admin_credentials(login: str, password: str) -> bool:
+    return verify_admin(login, password) is not None
+
+
+def is_admin_login(login: str) -> bool:
+    return login in _admin_accounts()
+
+
+# Legacy alias used elsewhere in the codebase
 def check_credentials(login: str, password: str) -> bool:
-    return (login or "") == LOGIN and (password or "") == PASSWORD
+    return check_admin_credentials(login, password)
 
 
-def issue_cookie(response: Response) -> None:
-    token = _serializer.dumps({"u": LOGIN})
+def issue_admin_cookie(response: Response, login: str, request: Any = None) -> None:
+    token = _serializer.dumps({"u": login.strip(), "v": 1})
     response.set_cookie(
         COOKIE_NAME,
         token,
@@ -44,30 +103,107 @@ def issue_cookie(response: Response) -> None:
         httponly=True,
         samesite="lax",
         secure=_cookie_secure(),
+        path="/",
     )
 
 
+def issue_user_cookie(response: Response, user_id: str, request: Any = None) -> None:
+    token = _serializer.dumps({"uid": user_id, "v": 1})
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(),
+        path="/",
+    )
+
+
+# Backwards-compat name still imported by app.py.
+def issue_cookie(response: Response) -> None:
+    issue_admin_cookie(response, LOGIN)
+
+
 def clear_cookie(response: Response) -> None:
-    response.delete_cookie(COOKIE_NAME, secure=_cookie_secure())
+    response.delete_cookie(COOKIE_NAME, secure=_cookie_secure(), path="/")
 
 
-def _current_user_from_cookie(token: Optional[str]) -> Optional[str]:
+def _decode(token: Optional[str]) -> Optional[dict[str, Any]]:
     if not token:
         return None
     try:
-        data = _serializer.loads(token)
+        return _serializer.loads(token)
     except BadSignature:
         return None
-    return (data or {}).get("u")
-
-
-def require_login(request: Request) -> str:
-    token = request.cookies.get(COOKIE_NAME)
-    user = _current_user_from_cookie(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="not authenticated")
-    return user
 
 
 def current_user(request: Request) -> Optional[str]:
-    return _current_user_from_cookie(request.cookies.get(COOKIE_NAME))
+    """Return cookie 'u' (admin login) if present — kept for backwards compat."""
+    data = _decode(request.cookies.get(COOKIE_NAME))
+    if not data:
+        return None
+    return data.get("u")
+
+
+def current_user_id(request: Request) -> Optional[str]:
+    data = _decode(request.cookies.get(COOKIE_NAME))
+    if not data:
+        return None
+    return data.get("uid")
+
+
+def current_identity(request: Request, users: UserStore) -> dict[str, Any]:
+    """Resolve cookie → identity dict.
+
+    Returns:
+        {"kind": "admin", "user": "<login>"}        for the admin operator
+        {"kind": "user",  "record": UserRecord}     for a customer
+        {"kind": "anon"}                             when not logged in
+    """
+    data = _decode(request.cookies.get(COOKIE_NAME))
+    if not data:
+        return {"kind": "anon"}
+    admin_login = data.get("u")
+    if admin_login and is_admin_login(str(admin_login)):
+        return {"kind": "admin", "user": str(admin_login)}
+    uid = data.get("uid")
+    if uid:
+        rec = users.get(uid)
+        if rec is not None:
+            return {"kind": "user", "record": rec}
+    return {"kind": "anon"}
+
+
+def require_login(request: Request) -> str:
+    """Require any logged-in identity (admin OR user)."""
+    data = _decode(request.cookies.get(COOKIE_NAME))
+    if not data:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    if data.get("u") and is_admin_login(str(data["u"])):
+        return str(data["u"])
+    if data.get("uid"):
+        return f"user:{data['uid']}"
+    raise HTTPException(status_code=401, detail="not authenticated")
+
+
+def require_admin(request: Request, users: UserStore) -> str:
+    ident = current_identity(request, users)
+    if ident["kind"] != "admin":
+        raise HTTPException(status_code=403, detail="admin only")
+    return ident["user"]
+
+
+def require_subscription(request: Request, users: UserStore) -> dict[str, Any]:
+    """Admin always allowed; users need active non-blocked subscription."""
+    ident = current_identity(request, users)
+    if ident["kind"] == "admin":
+        return ident
+    if ident["kind"] == "user":
+        rec = ident["record"]
+        if rec.blocked:
+            raise HTTPException(status_code=403, detail="account blocked")
+        if rec.plan_expires_at <= time.time():
+            raise HTTPException(status_code=403, detail="subscription required")
+        return ident
+    raise HTTPException(status_code=401, detail="not authenticated")

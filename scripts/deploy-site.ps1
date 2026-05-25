@@ -24,6 +24,16 @@ if (-not (Test-Path (Join-Path $Root "bot\requirements.txt"))) {
 
 $tarArgs = @(
     "-czf", $Tmp,
+    "--exclude=web/.env",
+    "--exclude=web/users.json",
+    "--exclude=web/bots.json",
+    "--exclude=web/invoices.json",
+    "--exclude=web/promos.json",
+    "--exclude=web/notifications.json",
+    "--exclude=web/admin_audit.json",
+    "--exclude=web/security_state.json",
+    "--exclude=web/.venv",
+    "--exclude=web/__pycache__",
     "-C", $Root,
     "web", "frontend", "bot", "deploy/site"
 )

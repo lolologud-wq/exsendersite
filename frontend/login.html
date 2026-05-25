@@ -23,7 +23,7 @@
 
       <form id="loginForm" class="login-form" autocomplete="on">
         <div class="field">
-          <label class="field-label" for="login">Логин</label>
+          <label class="field-label" for="login">Email или логин</label>
           <input class="input" id="login" name="login" type="text" required autocomplete="username" />
         </div>
         <div class="field">
@@ -34,9 +34,13 @@
         <button type="submit" class="btn-primary login-submit" id="loginBtn">
           <span>Войти</span>
         </button>
+        <p class="login-foot">
+          Ещё нет аккаунта? <a href="/register">Зарегистрироваться</a>
+        </p>
       </form>
     </div>
   </div>
+  <script src="js/http.js"></script>
   <script src="js/login.js"></script>
 </body>
 </html>

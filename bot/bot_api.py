@@ -117,8 +117,8 @@ def build_app(service: BotService, token: str) -> FastAPI:
     @app.get(
         "/api/local/accounts/{aid}/dialogs", dependencies=[Depends(require_token)]
     )
-    async def account_dialogs(aid: str) -> list[dict[str, Any]]:
-        return await service.list_account_dialogs(aid)
+    async def account_dialogs(aid: str, force: bool = False) -> list[dict[str, Any]]:
+        return await service.list_account_dialogs(aid, force=force)
 
     @app.get(
         "/api/local/accounts/{aid}/channels", dependencies=[Depends(require_token)]
@@ -167,6 +167,22 @@ def build_app(service: BotService, token: str) -> FastAPI:
         return await service.set_spam(aid, bool((payload or {}).get("running", False)))
 
     # ----------------------------------------------------------------- chats
+    @app.patch(
+        "/api/local/accounts/{aid}/chats/bulk",
+        dependencies=[Depends(require_token)],
+    )
+    async def bulk_chats(aid: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = payload or {}
+        chat_ids = body.get("chatIds") or body.get("chat_ids")
+        if chat_ids is not None and not isinstance(chat_ids, list):
+            raise HTTPException(status_code=400, detail="chatIds must be a list")
+        return await service.bulk_set_chats_enabled(
+            aid,
+            bool(body.get("enabled", False)),
+            chat_ids,
+            force_dialogs=bool(body.get("forceDialogs") or body.get("force_dialogs")),
+        )
+
     @app.patch(
         "/api/local/accounts/{aid}/chats/{chat_id}",
         dependencies=[Depends(require_token)],

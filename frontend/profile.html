@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>exsender · Профиль</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/profile.css" />
+</head>
+<body class="pf-body">
+
+<header class="pf-topbar">
+  <div class="pf-container pf-topbar-inner">
+    <a href="/" class="pf-brand">
+      <span class="logo-mark">e</span>
+      <span>exsender</span>
+    </a>
+    <nav class="pf-topnav">
+      <a href="/app" id="pfDashLink">Дашборд</a>
+      <a href="/profile" class="active">Профиль</a>
+    </nav>
+    <div class="pf-top-actions">
+      <span class="pf-user" id="pfUserEmail">—</span>
+      <button class="btn-ghost" id="pfLogoutBtn">Выйти</button>
+    </div>
+  </div>
+</header>
+
+<main class="pf-main">
+  <div class="pf-container">
+
+    <section class="pf-status" id="pfStatusCard">
+      <div class="pf-status-left">
+        <div class="pf-eyebrow">Текущий план</div>
+        <div class="pf-plan-name" id="pfPlanName">—</div>
+        <div class="pf-plan-meta" id="pfPlanMeta">Загрузка…</div>
+      </div>
+      <div class="pf-status-right">
+        <a class="btn-primary" href="/app" id="pfOpenApp">Открыть панель</a>
+      </div>
+    </section>
+
+    <section class="pf-alert" id="pfAlert" hidden></section>
+    <section class="pf-notify-list" id="pfNotifications" hidden></section>
+
+    <section class="pf-section pf-referral" id="pfReferralSection" hidden>
+      <h2 class="pf-h2">Реферальная программа</h2>
+      <p class="pf-sub">Пригласи друга — после его первой оплаты ты получишь бонусные дни.</p>
+      <div class="pf-ref-row">
+        <code id="pfRefCode">—</code>
+        <button type="button" class="btn-ghost" id="pfRefCopy">Копировать ссылку</button>
+      </div>
+    </section>
+
+    <section class="pf-section" id="pfPlansSection">
+      <h2 class="pf-h2">Тарифы</h2>
+      <p class="pf-sub">Оплата USDT через @CryptoBot — активация моментальная после оплаты.</p>
+      <div class="pf-promo-row">
+        <input class="input" id="pfPromoInput" placeholder="Промокод (опционально)" />
+        <button type="button" class="btn-ghost" id="pfPromoApply">Применить</button>
+      </div>
+      <p class="pf-promo-hint" id="pfPromoHint" hidden></p>
+
+      <div class="pf-plans" id="pfPlans"></div>
+    </section>
+
+    <section class="pf-section">
+      <h2 class="pf-h2">История платежей</h2>
+      <div class="pf-history" id="pfHistory">
+        <div class="pf-empty">Платежей пока нет.</div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- Pay dialog -->
+<div class="pf-modal" id="pfPayModal" hidden>
+  <div class="pf-modal-backdrop" data-pf-close></div>
+  <div class="pf-modal-card">
+    <button class="pf-modal-x" data-pf-close aria-label="Закрыть">×</button>
+    <h3 class="pf-modal-title" id="pfPayTitle">Оплата</h3>
+    <p class="pf-modal-sub" id="pfPaySub">Открой @CryptoBot и оплати счёт. Доступ откроется автоматически.</p>
+    <a class="btn-primary pf-pay-cta" id="pfPayLink" target="_blank" rel="noopener">Открыть @CryptoBot</a>
+    <div class="pf-pay-meta">
+      <div><span>Тариф</span><b id="pfPayPlan">—</b></div>
+      <div><span>Сумма</span><b id="pfPayAmount">—</b></div>
+      <div><span>Статус</span><b id="pfPayStatus" class="pf-pill">ожидание оплаты</b></div>
+    </div>
+    <p class="pf-modal-hint" id="pfPayHint">Окно само закроется, как только Crypto Bot подтвердит оплату.</p>
+  </div>
+</div>
+
+  <script src="js/http.js"></script>
+  <script src="js/profile.js"></script>
+</body>
+</html>

@@ -10,7 +10,7 @@ const EMPTY_OVERVIEW = {
   totals: {
     accounts: 0, running: 0, connected: 0, authorized: 0,
     healthy: 0, dead: 0, chats: 0, chatsEnabled: 0,
-    messages: 0, messagesQuota: 0, messagesRemaining: 0,
+    messages: 0, messagesQuota: 0, messagesRemaining: 0, errors: 0,
     withProxy: 0, withSource: 0,
   },
   accounts: [],
@@ -41,18 +41,23 @@ const STATE = {
   serverLogTarget: null,
   selectedAccounts: new Set(),
   activityCache: null,
+  chatsLoading: false,
+  chatsDialogsCache: new Map(),
 };
+
+const CHATS_CACHE_TTL_MS = 120_000;
+const CHATS_FETCH_CONCURRENCY = 4;
 
 // =======================================================
 //  HTTP — site API
 // =======================================================
-async function siteApi(method, path, body) {
+  async function siteApi(method, path, body) {
   const opts = { ...FETCH_OPTS, method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  const res = await secureFetch(path, opts);
   if (res.status === 401) {
     window.location.href = "/login";
     throw new Error("not authenticated");
@@ -99,7 +104,10 @@ const fetchOverview = async () => {
   return fetchOverviewForBot(bid);
 };
 const fetchAccount       = (aid, botId)        => botApi("GET",    `/accounts/${encodeURIComponent(aid)}`, undefined, botId);
-const fetchAccountDialogs = (aid, botId)       => botApi("GET",    `/accounts/${encodeURIComponent(aid)}/dialogs`, undefined, botId);
+const fetchAccountDialogs = (aid, botId, force = false) => {
+  const q = force ? "?force=true" : "";
+  return botApi("GET", `/accounts/${encodeURIComponent(aid)}/dialogs${q}`, undefined, botId);
+};
 const fetchAccountChannels = (aid, botId)      => botApi("GET",    `/accounts/${encodeURIComponent(aid)}/channels`, undefined, botId);
 const resolvePostLink      = (aid, url, botId) => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/resolve_post`, { url }, botId);
 const addChat            = (aid, body, botId)  => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/chats`, body, botId);
@@ -109,6 +117,7 @@ const activateSlot       = (aid, botId)        => botApi("POST",   `/accounts/${
 const patchSlot          = (aid, body, botId)  => botApi("PATCH",  `/accounts/${encodeURIComponent(aid)}`, body, botId);
 const setSpam            = (aid, running, botId) => botApi("POST", `/accounts/${encodeURIComponent(aid)}/spam`, { running }, botId);
 const patchChat          = (aid, cid, body, botId) => botApi("PATCH", `/accounts/${encodeURIComponent(aid)}/chats/${encodeURIComponent(cid)}`, body, botId);
+const bulkSetChats       = (aid, body, botId)  => botApi("PATCH",  `/accounts/${encodeURIComponent(aid)}/chats/bulk`, body, botId);
 const removeChat         = (aid, cid, botId)   => botApi("DELETE", `/accounts/${encodeURIComponent(aid)}/chats/${encodeURIComponent(cid)}`, undefined, botId);
 const authSendCode       = (aid, phone, botId) => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/auth/send_code`, { phone }, botId);
 const authSignIn         = (aid, code, pwd, botId) => botApi("POST", `/accounts/${encodeURIComponent(aid)}/auth/sign_in`, { code, password: pwd || undefined }, botId);
@@ -402,14 +411,26 @@ function overviewMessagesTotal(ov) {
   return Math.max(fromTotals, fromAccounts);
 }
 
+function accountErrorsTotal(a) {
+  return Math.max(
+    Number(a?.errorsTotal) || 0,
+    Number(a?.health?.errorsTotal) || 0,
+  );
+}
+
 function overviewMessageQuota(ov) {
   const t = ov?.totals || {};
   let quota = Number(t.messagesQuota) || 0;
   let remaining = Number(t.messagesRemaining) || 0;
-  if (!quota && Array.isArray(ov?.accounts)) {
-    for (const a of ov.accounts) {
-      quota += Number(a.messagesQuota) || 0;
-      remaining += Number(a.messagesRemaining) || 0;
+  let errors = Number(t.errors) || 0;
+  if (Array.isArray(ov?.accounts)) {
+    const fromAccounts = ov.accounts.reduce((s, a) => s + accountErrorsTotal(a), 0);
+    errors = Math.max(errors, fromAccounts);
+    if (!quota) {
+      for (const a of ov.accounts) {
+        quota += Number(a.messagesQuota) || 0;
+        remaining += Number(a.messagesRemaining) || 0;
+      }
     }
   }
   const sentInQuota = quota > 0 ? Math.max(0, quota - remaining) : 0;
@@ -417,6 +438,7 @@ function overviewMessageQuota(ov) {
     sent: sentInQuota,
     remaining,
     quota,
+    errors,
     totalSent: overviewMessagesTotal(ov),
   };
 }
@@ -465,6 +487,8 @@ function renderActiveCard(ov) {
     document.getElementById("activeProxy").textContent    = "—";
     document.getElementById("activeSource").textContent   = "—";
     document.getElementById("activeChip").textContent     = "—";
+    const errEl = document.getElementById("activeError");
+    if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
     renderRing(0, 0);
     return;
   }
@@ -476,7 +500,21 @@ function renderActiveCard(ov) {
   chip.classList.toggle("on",  acc.spamRunning);
   chip.classList.toggle("off", !acc.spamRunning);
 
-  document.getElementById("activeStatus").innerHTML = healthBadge(acc);
+  document.getElementById("activeStatus").innerHTML = healthBadge(acc, { inlineError: false });
+
+  const errEl = document.getElementById("activeError");
+  const errText = acc.health?.lastError
+    ? `${acc.health.lastErrorKind || "error"}: ${acc.health.lastError}`
+    : "";
+  if (errEl) {
+    if (errText) {
+      errEl.hidden = false;
+      errEl.textContent = errText;
+    } else {
+      errEl.hidden = true;
+      errEl.textContent = "";
+    }
+  }
 
   document.getElementById("activeInterval").textContent =
     fmtMinutes(acc.defaultIntervalMin) + fmtJitter(acc.defaultIntervalJitter);
@@ -549,31 +587,64 @@ function renderPieSvg(segments, opts = {}) {
   return `<svg viewBox="0 0 100 100" class="pie-svg" aria-hidden="true">${paths}${holeCircle}${center}</svg>`;
 }
 
+function pieSegmentsForDisplay(segments) {
+  const cleaned = segments.filter((s) => (Number(s.value) || 0) > 0);
+  if (!cleaned.length) return [{ value: 1, cls: "pie-sent" }];
+  const total = cleaned.reduce((s, seg) => s + (Number(seg.value) || 0), 0);
+  const errIdx = cleaned.findIndex((s) => s.cls === "pie-error");
+  if (errIdx < 0 || total <= 0) return cleaned;
+  const errVal = Number(cleaned[errIdx].value) || 0;
+  const minShare = 0.07;
+  if (errVal / total >= minShare) return cleaned;
+  const minVisual = total * minShare;
+  const boost = minVisual - errVal;
+  const othersSum = total - errVal;
+  if (othersSum <= 0) return cleaned;
+  return cleaned.map((seg, i) => {
+    if (i === errIdx) return { ...seg, value: minVisual };
+    const v = Number(seg.value) || 0;
+    return { ...seg, value: Math.max(0, v - (v / othersSum) * boost) };
+  });
+}
+
 function renderMessagesPie(ov) {
   const host = document.getElementById("messagesPieHost");
   const emptyEl = document.getElementById("messagesPieEmpty");
   const legend = document.getElementById("messagesPieLegend");
   if (!host) return;
 
-  const { sent, remaining, quota, totalSent } = overviewMessageQuota(ov);
+  const { sent, remaining, quota, errors, totalSent } = overviewMessageQuota(ov);
 
+  // No quota — show sent + errors only
   if (quota <= 0) {
     host.hidden = false;
     if (emptyEl) emptyEl.hidden = true;
-    if (legend) legend.textContent = `отправлено: ${fmtNumber(totalSent)}`;
+    const total = totalSent + errors;
+    const errPct = total > 0 ? Math.round((errors / total) * 100) : 0;
+    if (legend) {
+      legend.textContent = errors > 0
+        ? `${fmtNumber(totalSent)} отправлено · ${fmtNumber(errors)} ${pluralRu(errors, ["ошибка", "ошибки", "ошибок"])} (${errPct}%)`
+        : `отправлено: ${fmtNumber(totalSent)}`;
+    }
+    const segments = pieSegmentsForDisplay([
+      ...(totalSent > 0 ? [{ value: totalSent, cls: "pie-sent" }] : []),
+      ...(errors > 0 ? [{ value: errors, cls: "pie-error" }] : []),
+    ]);
     host.innerHTML = `
-      ${renderPieSvg(
-        [{ value: totalSent || 1, cls: "pie-sent" }],
-        { donut: true, center: fmtNumber(totalSent) },
-      )}
+      ${renderPieSvg(segments, {
+        donut: true,
+        center: fmtNumber(totalSent),
+        sub: errors > 0 ? `−${fmtNumber(errors)}` : undefined,
+      })}
       <div class="pie-legend">
         <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(totalSent)}</b></div>
+        ${errors > 0 ? `<div class="pie-legend-item"><span class="pie-dot error"></span>Ошибки <b>${fmtNumber(errors)}</b></div>` : ""}
       </div>`;
     return;
   }
 
   const total = sent + remaining;
-  if (total <= 0) {
+  if (total <= 0 && errors <= 0) {
     host.hidden = false;
     if (emptyEl) emptyEl.hidden = true;
     if (legend) legend.textContent = "отправлено: 0";
@@ -588,20 +659,31 @@ function renderMessagesPie(ov) {
   host.hidden = false;
   if (emptyEl) emptyEl.hidden = true;
 
-  const sentPct = Math.round((sent / total) * 100);
-  const remPct = Math.max(0, 100 - sentPct);
-  if (legend) legend.textContent = `${sentPct}% отправлено · ${remPct}% осталось`;
+  const grand = sent + remaining + errors || 1;
+  const sentPct = Math.round((sent / grand) * 100);
+  const errPct = Math.round((errors / grand) * 100);
+  const remPct = Math.max(0, 100 - sentPct - errPct);
+  if (legend) {
+    legend.textContent = errors > 0
+      ? `${sentPct}% отправлено · ${errPct}% ошибок · ${remPct}% осталось`
+      : `${sentPct}% отправлено · ${remPct}% осталось`;
+  }
+
+  const segments = pieSegmentsForDisplay([
+    ...(sent > 0 ? [{ value: sent, cls: "pie-sent" }] : []),
+    ...(errors > 0 ? [{ value: errors, cls: "pie-error" }] : []),
+    ...(remaining > 0 ? [{ value: remaining, cls: "pie-unsent" }] : []),
+  ]);
 
   host.innerHTML = `
-    ${renderPieSvg(
-      [
-        { value: sent, cls: "pie-sent" },
-        { value: remaining, cls: "pie-unsent" },
-      ],
-      { donut: true, center: `${sentPct}%`, sub: `${fmtNumber(sent)}/${fmtNumber(total)}` },
-    )}
+    ${renderPieSvg(segments, {
+      donut: true,
+      center: `${sentPct}%`,
+      sub: `${fmtNumber(sent)}/${fmtNumber(total)}`,
+    })}
     <div class="pie-legend">
       <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(sent)}</b></div>
+      ${errors > 0 ? `<div class="pie-legend-item"><span class="pie-dot error"></span>Ошибки <b>${fmtNumber(errors)}</b></div>` : ""}
       <div class="pie-legend-item"><span class="pie-dot unsent"></span>Не отправлено <b>${fmtNumber(remaining)}</b></div>
     </div>`;
 }
@@ -1018,7 +1100,7 @@ function fmtRelAgo(ts) {
   return `${Math.floor(sec / 86400)} д назад`;
 }
 
-function healthBadge(acc) {
+function healthBadge(acc, { inlineError = true } = {}) {
   const h = acc.health;
   if (!h) {
     if (acc.spamRunning) return '<span class="badge badge-paid">работает</span>';
@@ -1026,14 +1108,17 @@ function healthBadge(acc) {
     return '<span class="badge badge-pending">остановлен</span>';
   }
   const cls = HEALTH_BADGE_CLASS[h.tone] || "badge-pending";
+  const fullErr = h.lastError
+    ? `${h.lastErrorKind || "error"}: ${h.lastError}`
+    : "";
   const title = [
-    h.lastError ? `${h.lastErrorKind || "error"}: ${h.lastError}` : "",
+    fullErr,
     h.lastSendAt ? `последняя отправка: ${fmtRelAgo(h.lastSendAt)}` : "",
     h.sendsTotal ? `всего отправок: ${h.sendsTotal}` : "",
   ].filter(Boolean).join(" · ");
-  const sub = h.lastError
-    ? `<div class="cell-mute" style="margin-top:4px; font-size: 11px; max-width: 220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(h.lastError)}">${escapeHtml(h.lastErrorKind || "error")}: ${escapeHtml(h.lastError)}</div>`
-    : (h.lastSendAt
+  const sub = h.lastError && inlineError
+    ? `<div class="health-error" title="${escapeHtml(fullErr)}">${escapeHtml(fullErr)}</div>`
+    : (!h.lastError && h.lastSendAt
         ? `<div class="cell-mute" style="margin-top:4px; font-size: 11px;">отправка ${escapeHtml(fmtRelAgo(h.lastSendAt))}</div>`
         : "");
   return `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(h.label)}</span>${sub}`;
@@ -1542,6 +1627,81 @@ function syncChatsFilterSelects() {
   updateChatsAccountFilterOptions();
   const accSel = document.getElementById("chatsAccountFilter");
   if (accSel) accSel.value = STATE.chatsAccountFilter;
+  const table = document.getElementById("chatsTable");
+  if (table) {
+    table.classList.toggle("chats-filter-account", !!STATE.chatsAccountFilter);
+    table.classList.toggle("chats-filter-bot", !!STATE.chatsBotFilter && !STATE.chatsAccountFilter);
+  }
+}
+
+function setChatsLoading(on) {
+  STATE.chatsLoading = on;
+  const el = document.getElementById("chatsLoading");
+  if (el) el.hidden = !on;
+}
+
+async function mapPool(items, limit, fn) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: n }, worker));
+  return results;
+}
+
+function getFilteredChatRows() {
+  const q = STATE.chatsSearch.trim().toLowerCase();
+  let rows = STATE.allChats;
+  if (STATE.chatsBotFilter) rows = rows.filter((r) => r.botId === STATE.chatsBotFilter);
+  if (STATE.chatsAccountFilter) {
+    const { botId, accountId } = parseChatAccountKey(STATE.chatsAccountFilter);
+    rows = rows.filter((r) => r.botId === botId && r.accountId === accountId);
+  }
+  if (q) {
+    rows = rows.filter((r) =>
+      r.chat.chatId.toLowerCase().includes(q)
+      || (r.chat.title || "").toLowerCase().includes(q),
+    );
+  }
+  return rows;
+}
+
+function updateChatsBulkUi(rows) {
+  const enabled = rows.filter((r) => r.chat.enabled).length;
+  const countEl = document.getElementById("chatsCount");
+  if (countEl) countEl.textContent = `${enabled} вкл / ${rows.length} чатов`;
+
+  const master = document.getElementById("chatsMasterToggle");
+  if (master && !master.matches(":focus")) {
+    master.indeterminate = enabled > 0 && enabled < rows.length;
+    master.checked = rows.length > 0 && enabled === rows.length;
+  }
+
+  const label = document.getElementById("chatsBulkLabel");
+  if (label) {
+    if (STATE.chatsAccountFilter) {
+      const { accountId } = parseChatAccountKey(STATE.chatsAccountFilter);
+      label.textContent = `Все чаты · ${accountId}`;
+    } else if (STATE.chatsBotFilter) {
+      label.textContent = `Все чаты · ${botLabel(STATE.chatsBotFilter)}`;
+    } else {
+      label.textContent = "Все чаты";
+    }
+  }
+}
+
+function chatSourceCell(c) {
+  if (c.sourceChannelId != null) {
+    const post = c.sourceMessageId != null ? `#${c.sourceMessageId}` : "последний";
+    return `<span class="badge badge-pending" title="${escapeHtml(formatSourceLabel(c.sourceChannelId, c.sourceMessageId, c.sourceForward))}">${post}</span>`;
+  }
+  return '<span class="cell-mute">—</span>';
 }
 
 function allChatRow(row) {
@@ -1557,18 +1717,19 @@ function allChatRow(row) {
     ? `<div class="cell-strong">${escapeHtml(c.title)}</div>`
     : "";
   return `
-    <tr data-cid="${escapeHtml(c.chatId)}" data-bot="${escapeHtml(row.botId)}" data-aid="${escapeHtml(row.accountId)}">
+    <tr class="chat-row" data-cid="${escapeHtml(c.chatId)}" data-bot="${escapeHtml(row.botId)}" data-aid="${escapeHtml(row.accountId)}">
       <td data-label="Вкл" class="td-toggle"><label class="switch"><input type="checkbox" data-act="toggle" ${c.enabled ? "checked" : ""} /><span></span></label></td>
-      <td data-label="VDS"><span class="cell-strong">${escapeHtml(row.botLabel || botLabel(row.botId))}</span></td>
-      <td data-label="Аккаунт"><span class="mono">${escapeHtml(row.accountId)}</span></td>
+      <td data-label="VDS" class="col-vds"><span class="cell-strong">${escapeHtml(row.botLabel || botLabel(row.botId))}</span></td>
+      <td data-label="Аккаунт" class="col-account"><span class="mono">${escapeHtml(row.accountId)}</span></td>
       <td data-label="Группа">
         ${title}
         <span class="mono cell-dim">${escapeHtml(c.chatId)}</span>
         ${c.configured === false ? '<span class="badge badge-pending" style="margin-left:6px">new</span>' : ""}
       </td>
-      <td data-label="Интервал">${interval}</td>
-      <td data-label="Текст">${hasCustomText ? '<span class="badge badge-pending">custom</span>' : '<span class="cell-mute">—</span>'}</td>
-      <td data-label="Отправлено">${limit}</td>
+      <td data-label="Интервал" class="col-interval">${interval}</td>
+      <td data-label="Текст" class="col-text">${hasCustomText ? '<span class="badge badge-pending">custom</span>' : '<span class="cell-mute">—</span>'}</td>
+      <td data-label="Пост" class="col-source">${chatSourceCell(c)}</td>
+      <td data-label="Отправлено" class="col-sent">${limit}</td>
       <td data-label="Действия" class="td-actions">
         <button class="ra" data-act="cfg" title="Настройки чата">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
@@ -1584,77 +1745,154 @@ function allChatRow(row) {
 function renderAllChatsTable() {
   const body = document.getElementById("allChatsBody");
   if (!body) return;
-  const q = STATE.chatsSearch.trim().toLowerCase();
-  let rows = STATE.allChats;
-  if (STATE.chatsBotFilter) rows = rows.filter((r) => r.botId === STATE.chatsBotFilter);
-  if (STATE.chatsAccountFilter) {
-    const { botId, accountId } = parseChatAccountKey(STATE.chatsAccountFilter);
-    rows = rows.filter((r) => r.botId === botId && r.accountId === accountId);
-  }
-  if (q) {
-    rows = rows.filter((r) =>
-      r.chat.chatId.toLowerCase().includes(q)
-      || (r.chat.title || "").toLowerCase().includes(q),
-    );
-  }
-
-  const enabled = rows.filter((r) => r.chat.enabled).length;
-  const countEl = document.getElementById("chatsCount");
-  if (countEl) countEl.textContent = `${enabled} вкл / ${rows.length} чатов`;
+  const rows = getFilteredChatRows();
+  updateChatsBulkUi(rows);
 
   if (!rows.length) {
     const hint = STATE.chatsAccountFilter || STATE.chatsBotFilter
-      ? "Нет групп — аккаунт авторизован? Нажми «Обновить» или добавь чат вручную"
-      : "Выбери аккаунт в фильтре или открой чаты из строки аккаунта";
-    body.innerHTML = `<tr><td colspan="8" class="empty-row">${hint}</td></tr>`;
+      ? "Нет групп — нажми «↻ Telegram» или добавь чат вручную"
+      : "Выбери аккаунт в фильтре — так список загрузится быстрее";
+    body.innerHTML = `<tr><td colspan="9" class="empty-row">${hint}</td></tr>`;
+    bindChatSwipeRows();
     return;
   }
   body.innerHTML = rows.slice(0, 500).map(allChatRow).join("");
+  bindChatSwipeRows();
+}
+
+async function loadConfiguredChatsForAccounts(accounts) {
+  const rows = [];
+  await mapPool(accounts, CHATS_FETCH_CONCURRENCY, async (a) => {
+    try {
+      const acc = await fetchAccount(a.id, a.botId);
+      for (const chat of (acc.chatList || [])) {
+        rows.push({ botId: a.botId, botLabel: a.botLabel, accountId: a.id, chat });
+      }
+    } catch (e) {
+      console.warn("account chats failed", a.id, e);
+    }
+  });
+  return rows;
+}
+
+async function loadTelegramDialogsForAccounts(accounts, force = false) {
+  const rows = [];
+  await mapPool(accounts, CHATS_FETCH_CONCURRENCY, async (a) => {
+    const cacheKey = `${a.botId}:${a.id}`;
+    try {
+      let dialogs;
+      const cached = STATE.chatsDialogsCache.get(cacheKey);
+      const now = Date.now();
+      if (!force && cached && now - cached.at < CHATS_CACHE_TTL_MS) {
+        dialogs = cached.data;
+      } else {
+        dialogs = await fetchAccountDialogs(a.id, a.botId, force);
+        STATE.chatsDialogsCache.set(cacheKey, { at: now, data: dialogs });
+      }
+      for (const chat of dialogs) {
+        rows.push({ botId: a.botId, botLabel: a.botLabel, accountId: a.id, chat });
+      }
+    } catch (e) {
+      if (force && e?.message?.includes("404")) {
+        toast("На VDS старая версия бота — передеплой через «Серверы → Deploy»", "info", 6000);
+      } else if (force) console.warn("dialogs failed", a.id, e);
+      try {
+        const acc = await fetchAccount(a.id, a.botId);
+        for (const chat of (acc.chatList || [])) {
+          rows.push({ botId: a.botId, botLabel: a.botLabel, accountId: a.id, chat });
+        }
+      } catch (e2) {
+        if (force) console.warn("account chats failed", a.id, e2);
+      }
+    }
+  });
+  return rows;
+}
+
+function chatsTargetAccounts() {
+  let accounts = flattenAccounts();
+  if (STATE.chatsBotFilter) accounts = accounts.filter((a) => a.botId === STATE.chatsBotFilter);
+  if (STATE.chatsAccountFilter) {
+    const { botId, accountId } = parseChatAccountKey(STATE.chatsAccountFilter);
+    accounts = accounts.filter((a) => a.botId === botId && a.id === accountId);
+  }
+  return accounts;
 }
 
 async function refreshChats(force = false) {
+  setChatsLoading(true);
   try {
     await fetchAllOverviews();
     syncChatsFilterSelects();
-    let accounts = flattenAccounts();
-    if (STATE.chatsBotFilter) accounts = accounts.filter((a) => a.botId === STATE.chatsBotFilter);
-    if (STATE.chatsAccountFilter) {
-      const { botId, accountId } = parseChatAccountKey(STATE.chatsAccountFilter);
-      accounts = accounts.filter((a) => a.botId === botId && a.id === accountId);
-    }
 
-    const rows = [];
-    for (const a of accounts) {
-      try {
-        const dialogs = await fetchAccountDialogs(a.id, a.botId);
-        for (const chat of dialogs) {
-          rows.push({
-            botId: a.botId,
-            botLabel: a.botLabel,
-            accountId: a.id,
-            chat,
-          });
-        }
-      } catch (e) {
-        if (force && e?.message?.includes("404")) {
-          toast("На VDS старая версия бота — передеплой через «Серверы → Deploy»", "info", 6000);
-        } else if (force) console.warn("dialogs failed", a.id, e);
-        try {
-          const acc = await fetchAccount(a.id, a.botId);
-          for (const chat of (acc.chatList || [])) {
-            rows.push({ botId: a.botId, botLabel: a.botLabel, accountId: a.id, chat });
-          }
-        } catch (e2) {
-          if (force) console.warn("account chats failed", a.id, e2);
-        }
-      }
-    }
+    const accounts = chatsTargetAccounts();
+    const rows = await loadTelegramDialogsForAccounts(accounts, force);
+
     STATE.allChats = rows;
     renderAllChatsTable();
   } catch (e) {
     if (force) toastErr(e);
+  } finally {
+    setChatsLoading(false);
+    if (force) spinRefreshBtn();
   }
-  if (force) spinRefreshBtn();
+}
+
+async function bulkToggleChats(enabled) {
+  const visibleRows = getFilteredChatRows();
+  if (!visibleRows.length) {
+    toastErr(new Error("Список чатов пуст"));
+    return;
+  }
+
+  // Group visible rows by (botId, accountId)
+  const groups = new Map();
+  for (const r of visibleRows) {
+    const key = `${r.botId}|${r.accountId}`;
+    if (!groups.has(key)) groups.set(key, { botId: r.botId, accountId: r.accountId, ids: [] });
+    groups.get(key).ids.push(r.chat.chatId);
+  }
+  const tasks = [...groups.values()];
+
+  setChatsLoading(true);
+  try {
+    let total = 0;
+    const isAccountScope = !!STATE.chatsAccountFilter && tasks.length === 1;
+    await mapPool(tasks, CHATS_FETCH_CONCURRENCY, async (t) => {
+      const body = isAccountScope
+        ? { enabled, forceDialogs: true }
+        : { enabled, chatIds: t.ids };
+      try {
+        const res = await bulkSetChats(t.accountId, body, t.botId);
+        total += res?.count || 0;
+      } catch (e) {
+        if (!t.ids.length) throw e;
+        for (const cid of t.ids) {
+          try {
+            await patchChat(t.accountId, cid, { enabled }, t.botId);
+            total += 1;
+          } catch (err) {
+            console.warn("patchChat fallback failed", cid, err);
+          }
+        }
+      }
+      // Optimistic local update so UI reflects the change immediately
+      for (const r of STATE.allChats) {
+        if (r.botId === t.botId && r.accountId === t.accountId && t.ids.includes(r.chat.chatId)) {
+          r.chat.enabled = enabled;
+          r.chat.configured = true;
+        }
+      }
+    });
+    renderAllChatsTable();
+    toastOk(enabled ? `Включено ${total} чатов` : `Выключено ${total} чатов`);
+    STATE.chatsDialogsCache.clear();
+    refreshChats(false).catch(() => {});
+  } catch (e) {
+    toastErr(e);
+  } finally {
+    setChatsLoading(false);
+  }
 }
 
 async function goToChatsTab(botId, accountId) {
@@ -1830,7 +2068,7 @@ async function saveSettingsForm(ev) {
   };
   try {
     await patchSlot(accountId, body, botId);
-    toastOk("Настройки сохранены");
+    toastOk("Настройки сохранены — интервал применится к следующим отправкам");
     loadSettingsForm();
   } catch (e) { toastErr(e); }
 }
@@ -2022,9 +2260,16 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
     title: `Чат: ${title}`,
     body: `
       <form class="form-grid" id="chatSettingsForm" autocomplete="off">
-        <div class="callout">${escapeHtml(botLabel(botId))} · ${escapeHtml(accountId)}<br/>
-        Текст, интервал и лимиты — здесь. Канал-источник — во вкладке <b>Источники</b>.</div>
+        <div class="callout">${escapeHtml(botLabel(botId))} · ${escapeHtml(accountId)}</div>
         <label class="check"><input type="checkbox" name="enabled" ${c.enabled ? "checked" : ""} /><span>Включён в рассылке</span></label>
+        <label class="field">
+          <span class="field-label">Пост для рассылки (t.me)</span>
+          <div class="field-row" style="gap:8px;">
+            <input class="input mono" id="chatPostUrl" placeholder="https://t.me/channel/123" />
+            <button type="button" class="btn-primary" id="chatApplyPostBtn">Применить</button>
+          </div>
+          <span class="field-hint">Ссылка на пост — будет пересылаться/копироваться в этот чат</span>
+        </label>
         <label class="field"><span class="field-label">Кастомное сообщение</span><textarea class="input" name="customMessage" rows="3" placeholder="пусто = стандартный текст из «Настройки»">${escapeHtml(c.customMessage || "")}</textarea></label>
         <label class="field"><span class="field-label">Несколько текстов (через строку ---)</span><textarea class="input" name="textVariants" rows="4" placeholder="вар1\n---\nвар2">${escapeHtml(variantsToText(c.textVariants))}</textarea></label>
         <label class="field"><span class="field-label">Доп. текст (только при копии, не forward)</span><textarea class="input" name="extraText" rows="2">${escapeHtml(c.extraText || "")}</textarea></label>
@@ -2037,18 +2282,60 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
           <label class="field"><span class="field-label">Задержка старта, мин</span><input class="input" name="startDelayMin" type="number" min="0" step="0.1" value="${c.startDelayMin ?? ""}" placeholder="нет" /></label>
         </div>
         <label class="check"><input type="checkbox" name="sourceForward" ${c.sourceForward ? "checked" : ""} /><span>Источник: пересылка (forward)</span></label>
-        <div class="callout cell-dim">Источник чата: <b>${escapeHtml(sourceLabel)}</b></div>
+        <div class="callout cell-dim" id="chatSourceLabel">Источник чата: <b>${escapeHtml(sourceLabel)}</b></div>
         <div class="callout">Отправлено: <b>${fmtNumber(c.messagesSent || 0)}</b>${c.messageLimit != null ? ` / ${c.messageLimit}` : ""}</div>
       </form>
     `,
     footer: `
-      <button class="btn-ghost" data-act="chat-goto-source">Источник…</button>
+      <button class="btn-ghost" data-act="chat-clear-source">Сбросить пост</button>
+      <button class="btn-ghost" data-act="chat-goto-source">Все источники…</button>
       <button class="btn-ghost" data-act="chat-reset-text">Сброс текста</button>
       <button class="btn-ghost" data-modal-close>Отмена</button>
       <button class="btn-primary" id="modalSubmit">Сохранить</button>
     `,
   });
   document.getElementById("modalPanel").classList.add("modal-wide");
+
+  document.getElementById("chatApplyPostBtn")?.addEventListener("click", async () => {
+    const url = String(document.getElementById("chatPostUrl")?.value || "").trim();
+    if (!url) { toastErr(new Error("Вставь ссылку t.me на пост")); return; }
+    const btn = document.getElementById("chatApplyPostBtn");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await resolvePostLink(accountId, url, botId);
+      await patchChat(accountId, chatId, {
+        sourceChannelId: Number(res.channelId),
+        sourceMessageId: res.messageId,
+      }, botId);
+      const label = formatSourceLabel(res.channelId, res.messageId, c.sourceForward);
+      const el = document.getElementById("chatSourceLabel");
+      if (el) el.innerHTML = `Источник чата: <b>${escapeHtml(label)}</b>`;
+      const row = STATE.allChats.find((r) => r.botId === botId && r.accountId === accountId && r.chat.chatId === String(chatId));
+      if (row) {
+        row.chat.sourceChannelId = Number(res.channelId);
+        row.chat.sourceMessageId = res.messageId;
+        row.chat.configured = true;
+      }
+      toastOk("Пост назначен для рассылки");
+      document.getElementById("chatPostUrl").value = "";
+    } catch (e) { toastErr(e); }
+    finally { if (btn) btn.disabled = false; }
+  });
+
+  document.getElementById("modalRoot").querySelector('[data-act="chat-clear-source"]')?.addEventListener("click", async () => {
+    try {
+      await patchChat(accountId, chatId, { sourceChannelId: null, sourceMessageId: null }, botId);
+      toastOk("Пост сброшен");
+      const el = document.getElementById("chatSourceLabel");
+      if (el) el.innerHTML = "Источник чата: <b>не задан</b>";
+      const row = STATE.allChats.find((r) => r.botId === botId && r.accountId === accountId && r.chat.chatId === String(chatId));
+      if (row) {
+        row.chat.sourceChannelId = null;
+        row.chat.sourceMessageId = null;
+      }
+      renderAllChatsTable();
+    } catch (e) { toastErr(e); }
+  });
 
   document.getElementById("modalRoot").querySelector('[data-act="chat-goto-source"]')?.addEventListener("click", () => {
     closeModal();
@@ -2306,6 +2593,62 @@ function bindTable() {
   });
 }
 
+function bindChatSwipeRows() {
+  if (!window.matchMedia("(max-width: 900px)").matches) return;
+  document.querySelectorAll("#allChatsBody tr.chat-row").forEach((row) => {
+    if (row.dataset.swipeBound) return;
+    row.dataset.swipeBound = "1";
+    const { cid, bot, aid } = row.dataset;
+
+    let actions = row.querySelector(".chat-swipe-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "chat-swipe-actions";
+      actions.innerHTML = `
+        <button class="ra" data-swipe="cfg" title="Настройки">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </button>
+        <button class="ra ra-danger" data-swipe="del" title="Удалить">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+        </button>`;
+      row.appendChild(actions);
+    }
+
+    actions.querySelector('[data-swipe="cfg"]')?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const chatRow = STATE.allChats.find((r) => r.botId === bot && r.accountId === aid && r.chat.chatId === cid);
+      openChatSettingsModal(bot, aid, cid, chatRow?.chat);
+      row.classList.remove("swipe-open");
+    });
+    actions.querySelector('[data-swipe="del"]')?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      row.querySelector('[data-act="del"]')?.click();
+      row.classList.remove("swipe-open");
+    });
+
+    let startX = 0;
+    let tracking = false;
+    row.addEventListener("touchstart", (e) => {
+      if (e.target.closest("input, button, .ra, label.switch")) return;
+      startX = e.touches[0].clientX;
+      tracking = true;
+    }, { passive: true });
+    row.addEventListener("touchmove", (e) => {
+      if (!tracking) return;
+      const dx = e.touches[0].clientX - startX;
+      if (dx < -40) row.classList.add("swipe-open");
+      if (dx > 40) row.classList.remove("swipe-open");
+    }, { passive: true });
+    row.addEventListener("touchend", () => { tracking = false; });
+  });
+}
+
+function bindChatsBulkActions() {
+  document.getElementById("chatsMasterToggle")?.addEventListener("change", (e) => {
+    bulkToggleChats(!!e.target.checked);
+  });
+}
+
 function bindChatsTable() {
   document.getElementById("allChatsBody")?.addEventListener("click", async (e) => {
     const tr = e.target.closest("tr[data-cid]");
@@ -2320,21 +2663,7 @@ function bindChatsTable() {
       return;
     }
 
-    if (actBtn.dataset.act === "toggle") {
-      const want = actBtn.checked;
-      try {
-        await patchChat(aid, cid, { enabled: want }, bot);
-        const row = STATE.allChats.find((r) => r.botId === bot && r.accountId === aid && r.chat.chatId === cid);
-        if (row) {
-          row.chat.enabled = want;
-          row.chat.configured = true;
-        }
-        renderAllChatsTable();
-      } catch (err) {
-        actBtn.checked = !want;
-        toastErr(err);
-      }
-    } else if (actBtn.dataset.act === "del") {
+    if (actBtn.dataset.act === "del") {
       if (!confirm(`Удалить чат ${cid} из ${aid}?`)) return;
       try {
         await removeChat(aid, cid, bot);
@@ -2344,6 +2673,27 @@ function bindChatsTable() {
         renderAllChatsTable();
         toastOk("Чат удалён");
       } catch (err) { toastErr(err); }
+    }
+  });
+
+  document.getElementById("allChatsBody")?.addEventListener("change", async (e) => {
+    const actBtn = e.target.closest('[data-act="toggle"]');
+    if (!actBtn) return;
+    const tr = actBtn.closest("tr[data-cid]");
+    if (!tr) return;
+    const { cid, bot, aid } = tr.dataset;
+    const want = actBtn.checked;
+    try {
+      await patchChat(aid, cid, { enabled: want }, bot);
+      const row = STATE.allChats.find((r) => r.botId === bot && r.accountId === aid && r.chat.chatId === cid);
+      if (row) {
+        row.chat.enabled = want;
+        row.chat.configured = true;
+      }
+      renderAllChatsTable();
+    } catch (err) {
+      actBtn.checked = !want;
+      toastErr(err);
     }
   });
 }
@@ -2484,6 +2834,15 @@ function renderExtraBotSelects() {
 
 async function loadBots() {
   STATE.bots = await listBots();
+  const ids = new Set(STATE.bots.map((b) => b.id));
+  if (STATE.selectedBotId && !ids.has(STATE.selectedBotId)) {
+    STATE.selectedBotId = "";
+    localStorage.removeItem("selectedBotId");
+  }
+  if (STATE.dashboardBotId && !ids.has(STATE.dashboardBotId)) {
+    STATE.dashboardBotId = "";
+    localStorage.removeItem("dashboardBotId");
+  }
   if (!STATE.selectedBotId && STATE.bots.length === 1) {
     STATE.selectedBotId = STATE.bots[0].id;
     localStorage.setItem("selectedBotId", STATE.selectedBotId);
@@ -2934,6 +3293,8 @@ function bindServersTable() {
 // =======================================================
 async function init() {
   let meUser = "";
+  let meKind = "";
+  let meProfile = null;
   try {
     const me = await siteApi("GET", "/api/auth/me");
     if (!me.user) {
@@ -2941,16 +3302,86 @@ async function init() {
       return;
     }
     meUser = String(me.user || "");
+    meKind = me.kind === "admin" ? "admin" : "user";
+    meProfile = me.profile || null;
   } catch {
     window.location.href = "/login";
     return;
   }
 
+  const navAdmin = document.getElementById("navAdmin");
+  const navSupport = document.getElementById("navSupport");
+  const subBanner = document.getElementById("subBanner");
+
+  function setSubBanner(active, profile) {
+    if (!subBanner) return;
+    if (active) {
+      subBanner.setAttribute("hidden", "");
+      return;
+    }
+    subBanner.removeAttribute("hidden");
+    const bannerText = document.getElementById("subBannerText");
+    if (bannerText) {
+      const exp = profile?.planExpiresAt;
+      bannerText.textContent = exp
+        ? "Подписка истекла — продли тариф, чтобы пользоваться панелью."
+        : "Подписка не активна — оформи тариф, чтобы пользоваться панелью.";
+    }
+  }
+
+  if (meKind === "admin") {
+    navAdmin?.removeAttribute("hidden");
+    navSupport?.setAttribute("hidden", "");
+    subBanner?.setAttribute("hidden", "");
+  } else {
+    navAdmin?.setAttribute("hidden", "");
+    navSupport?.removeAttribute("hidden");
+    if (meProfile) {
+      setSubBanner(!!meProfile.planActive, meProfile);
+    }
+  }
+
   const avatarLabel = document.getElementById("userAvatarLabel");
   const avatarEl = document.getElementById("userAvatar");
   if (avatarLabel && meUser) {
-    avatarLabel.textContent = meUser.slice(0, 2).toLowerCase();
-    if (avatarEl) avatarEl.title = meUser;
+    const initials = meUser.includes("@")
+      ? meUser.split("@")[0].slice(0, 2)
+      : meUser.slice(0, 2);
+    avatarLabel.textContent = initials.toLowerCase();
+    if (avatarEl) {
+      avatarEl.title = meUser;
+      avatarEl.style.cursor = "pointer";
+      avatarEl.addEventListener("click", () => { window.location.href = "/profile"; });
+    }
+  }
+
+  if (meKind === "admin") {
+    document.getElementById("navProfile")?.removeAttribute("hidden");
+  } else if (meKind === "user") {
+    document.getElementById("navProfile")?.removeAttribute("hidden");
+    try {
+      const prof = await siteApi("GET", "/api/users/me");
+      if (prof.kind !== "admin") {
+        const p = prof.profile;
+        setSubBanner(!!p?.planActive, p);
+        const notes = prof.notifications || [];
+        notes.forEach((n) => {
+          const nb = document.createElement("div");
+          nb.className = "sub-banner notify-banner";
+          nb.innerHTML = `<span><b>${escapeHtml(n.title)}</b> — ${escapeHtml(n.message)}</span>
+            <button class="btn-ghost sub-banner-btn" data-nid="${escapeHtml(n.id)}">OK</button>`;
+          document.querySelector(".main")?.insertBefore(nb, document.querySelector(".topbar"));
+          nb.querySelector("button")?.addEventListener("click", async () => {
+            try {
+              await siteApi("POST", `/api/users/notifications/${encodeURIComponent(n.id)}/read`);
+            } catch (_) { /* ignore */ }
+            nb.remove();
+          });
+        });
+      }
+    } catch (e) {
+      console.warn("profile load", e);
+    }
   }
 
   bindNav();
@@ -2958,6 +3389,7 @@ async function init() {
   bindFilters();
   bindTable();
   bindChatsTable();
+  bindChatsBulkActions();
   bindServersTable();
   bindModal();
   bindBotSelect();
@@ -2977,7 +3409,7 @@ async function init() {
   STATE.pollTimer = setInterval(() => {
     if (STATE.view === "dashboard") refresh();
     else if (STATE.view === "accounts") refreshAccounts();
-    else if (STATE.view === "chats") refreshChats();
+    else if (STATE.view === "chats") refreshChats(false);
     else if (STATE.view === "settings") refreshSettings();
     else if (STATE.view === "sources") refreshSources();
     else if (STATE.view === "servers") refreshServers();

@@ -157,7 +157,7 @@ def _build_bot_tarball() -> bytes:
 def _build_env_file(env: dict[str, str]) -> str:
     lines: list[str] = []
     for k, v in env.items():
-        if v is None or v == "":
+        if v is None:
             continue
         s = str(v).replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'{k}="{s}"')
@@ -261,8 +261,12 @@ def _normalize_bot_env(env: dict[str, str], api_token: str, api_port: int) -> di
         "BOT_API_HOST": "0.0.0.0",
         "BOT_API_PORT": str(api_port),
         "BOT_API_ENABLED": "1",
+        # Empty ACCOUNTS list — bot starts without auto-creating "default" slot.
+        "ACCOUNTS": "",
     }
-    return {k: v for k, v in merged.items() if v}
+    out = {k: v for k, v in merged.items() if v}
+    out["ACCOUNTS"] = ""
+    return out
 
 
 async def _pick_api_port(conn: asyncssh.SSHClientConnection, preferred: int) -> int:

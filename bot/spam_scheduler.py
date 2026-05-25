@@ -22,8 +22,40 @@ logger = logging.getLogger(__name__)
 _spam_loop_started: set[str] = set()
 
 _GAP = 1.5
-_FIRST_FIRE_SEC = 3.0
 _FORBIDDEN_BACKOFF_SEC = 3600.0
+
+# Minimum time between ANY two sends on one account (keyed by account_key).
+_account_last_send: dict[str, float] = {}
+
+
+def _account_gap_sec(state: RuntimeState) -> float:
+    base_min = max(0.1, float(state.default_interval_min or 5))
+    for cid in enabled_chat_ids(state):
+        c = state.cfg(cid)
+        if c.custom_interval_min is not None and c.custom_interval_min > 0:
+            base_min = max(base_min, float(c.custom_interval_min))
+    return base_min * 60.0
+
+
+def _wait_for_account_gap(account_key: Optional[str], state: RuntimeState, loop) -> bool:
+    """Sleep until global inter-message gap elapsed. False = spam stopped."""
+    if not account_key:
+        return True
+    gap = _account_gap_sec(state)
+    last = _account_last_send.get(account_key, 0.0)
+    wait = last + gap - loop.time()
+    while wait > 0:
+        if not state.spam_running:
+            return False
+        chunk = min(wait, 2.0)
+        await asyncio.sleep(chunk)
+        wait = last + gap - loop.time()
+    return True
+
+
+def _mark_account_send(account_key: Optional[str], loop) -> None:
+    if account_key:
+        _account_last_send[account_key] = loop.time()
 
 
 def _is_write_forbidden(e: BaseException) -> bool:
@@ -131,6 +163,20 @@ def start_spam_loop_background(
     return True
 
 
+def _record_send_error(
+    account_key: Optional[str],
+    state: RuntimeState,
+    persist: Callable[[], None],
+    err: BaseException,
+    *,
+    chat_id: Optional[int] = None,
+) -> None:
+    if account_key:
+        health.note_error(account_key, err, chat_id=chat_id)
+    state.errors_total = int(state.errors_total or 0) + 1
+    persist()
+
+
 async def spam_loop(
     client: TelegramClient,
     state: RuntimeState,
@@ -140,10 +186,14 @@ async def spam_loop(
 ) -> None:
     next_fire: dict[int, float] = {}
     loop = asyncio.get_running_loop()
+    seen_interval_seq = -1
 
     while True:
         await asyncio.sleep(2)
         try:
+            if state.interval_seq != seen_interval_seq:
+                next_fire.clear()
+                seen_interval_seq = state.interval_seq
             if not client.is_connected():
                 next_fire.clear()
                 continue
@@ -174,127 +224,130 @@ async def spam_loop(
                     if delay_sec > 0:
                         next_fire[cid] = now + delay_sec
                     else:
-                        # Первое сообщение скоро, дальше — полный интервал (раньше ждали целый интервал сразу).
-                        next_fire[cid] = now + _FIRST_FIRE_SEC
+                        next_fire[cid] = now + random_interval_seconds(state, cid)
 
             due = [cid for cid in ids if next_fire.get(cid, 0) <= now]
+            if not due:
+                continue
             due.sort(key=lambda x: next_fire.get(x, 0))
+            cid = due[0]
 
-            for cid in due:
-                if not state.spam_running:
-                    break
-                if cid not in enabled_chat_ids(state):
-                    continue
-                try:
-                    cfg = state.cfg(cid)
-                    lim = cfg.message_limit
-                    if lim is not None and int(lim) > 0:
-                        if cfg.messages_sent >= int(lim):
-                            c2 = state.cfg(cid)
-                            c2.enabled = False
-                            state.set_cfg(cid, c2)
-                            persist()
-                            del next_fire[cid]
-                            logger.info(
-                                "Лимит %s достигнут для %s — чат выключен.",
-                                lim,
-                                cid,
-                            )
-                            continue
-                    plan = await _resolve_send_plan(client, state, cid)
-                    if plan.is_forward:
-                        if not plan.forward_msg_ids or plan.forward_from is None:
-                            logger.warning(
-                                "Пересылка: нет сообщения в канале-источнике, пропуск %s",
-                                cid,
-                            )
-                            next_fire[cid] = loop.time() + random_interval_seconds(
-                                state, cid
-                            )
-                            continue
-                        await client.forward_messages(
-                            cid,
-                            list(plan.forward_msg_ids),
-                            from_peer=plan.forward_from,
-                        )
-                    else:
-                        text, entities = plan.text, plan.entities
-                        if not text:
-                            logger.warning("Пустой текст, пропуск %s", cid)
-                            next_fire[cid] = loop.time() + random_interval_seconds(
-                                state, cid
-                            )
-                            continue
-                        if entities:
-                            try:
-                                await client.send_message(
-                                    cid, text, formatting_entities=entities
-                                )
-                            except TypeError:
-                                await client.send_message(cid, text)
-                        else:
-                            await client.send_message(cid, text)
-                    logger.info("Отправлено в чат %s", cid)
-                    if account_key:
-                        health.note_send(account_key, chat_id=cid)
-                    c3 = state.cfg(cid)
-                    c3.messages_sent = int(c3.messages_sent or 0) + 1
-                    lim2 = c3.message_limit
-                    hit = (
-                        lim2 is not None
-                        and int(lim2) > 0
-                        and c3.messages_sent >= int(lim2)
-                    )
-                    if hit:
-                        c3.enabled = False
-                    state.set_cfg(cid, c3)
-                    persist()
-                    if hit:
+            if not await _wait_for_account_gap(account_key, state, loop):
+                continue
+            if not state.spam_running:
+                continue
+            if cid not in enabled_chat_ids(state):
+                continue
+            try:
+                cfg = state.cfg(cid)
+                lim = cfg.message_limit
+                if lim is not None and int(lim) > 0:
+                    if cfg.messages_sent >= int(lim):
+                        c2 = state.cfg(cid)
+                        c2.enabled = False
+                        state.set_cfg(cid, c2)
+                        persist()
                         del next_fire[cid]
                         logger.info(
                             "Лимит %s достигнут для %s — чат выключен.",
-                            lim2,
+                            lim,
                             cid,
                         )
-                        await asyncio.sleep(_GAP)
                         continue
-                except (FloodWaitError, SlowModeWaitError) as e:
-                    wait = int(getattr(e, "seconds", 0) or 0) + 2
-                    logger.warning(
-                        "Flood/SlowMode %ss для %s (%s) — чат отложен, остальные без паузы",
-                        wait,
+                plan = await _resolve_send_plan(client, state, cid)
+                if plan.is_forward:
+                    if not plan.forward_msg_ids or plan.forward_from is None:
+                        logger.warning(
+                            "Пересылка: нет сообщения в канале-источнике, пропуск %s",
+                            cid,
+                        )
+                        next_fire[cid] = loop.time() + random_interval_seconds(
+                            state, cid
+                        )
+                        continue
+                    await client.forward_messages(
                         cid,
-                        type(e).__name__,
+                        list(plan.forward_msg_ids),
+                        from_peer=plan.forward_from,
                     )
-                    if account_key:
-                        health.note_error(account_key, e, chat_id=cid)
-                    # Не sleep здесь: иначе вся рассылка замирает. Только этот peer ждёт свой срок.
-                    next_fire[cid] = loop.time() + float(max(wait, 1))
+                else:
+                    text, entities = plan.text, plan.entities
+                    if not text:
+                        logger.warning("Пустой текст, пропуск %s", cid)
+                        next_fire[cid] = loop.time() + random_interval_seconds(
+                            state, cid
+                        )
+                        continue
+                    if entities:
+                        try:
+                            await client.send_message(
+                                cid, text, formatting_entities=entities
+                            )
+                        except TypeError:
+                            await client.send_message(cid, text)
+                    else:
+                        await client.send_message(cid, text)
+                logger.info("Отправлено в чат %s", cid)
+                if account_key:
+                    health.note_send(account_key, chat_id=cid)
+                _mark_account_send(account_key, loop)
+                c3 = state.cfg(cid)
+                c3.messages_sent = int(c3.messages_sent or 0) + 1
+                lim2 = c3.message_limit
+                hit = (
+                    lim2 is not None
+                    and int(lim2) > 0
+                    and c3.messages_sent >= int(lim2)
+                )
+                if hit:
+                    c3.enabled = False
+                state.set_cfg(cid, c3)
+                persist()
+                if hit:
+                    del next_fire[cid]
+                    logger.info(
+                        "Лимит %s достигнут для %s — чат выключен.",
+                        lim2,
+                        cid,
+                    )
+                    await asyncio.sleep(_GAP)
                     continue
-                except Exception as e:
-                    if _is_write_forbidden(e):
-                        logger.warning("Нет доступа к отправке в %s: %s", cid, e)
-                        if account_key:
-                            health.note_error(account_key, e, chat_id=cid)
-                        next_fire[cid] = loop.time() + _FORBIDDEN_BACKOFF_SEC
-                        await asyncio.sleep(_GAP)
-                        continue
-                    if _is_bad_peer(e):
-                        logger.warning("Некорректный peer %s, чат отключён: %s", cid, e)
-                        if account_key:
-                            health.note_error(account_key, e, chat_id=cid)
-                        c4 = state.cfg(cid)
-                        c4.enabled = False
-                        state.set_cfg(cid, c4)
-                        persist()
-                        del next_fire[cid]
-                        await asyncio.sleep(_GAP)
-                        continue
-                    logger.warning("Отправка в %s: %s", cid, e)
+            except (FloodWaitError, SlowModeWaitError) as e:
+                wait = int(getattr(e, "seconds", 0) or 0) + 2
+                logger.warning(
+                    "Flood/SlowMode %ss для %s (%s) — чат отложен",
+                    wait,
+                    cid,
+                    type(e).__name__,
+                )
+                if account_key:
+                    _record_send_error(account_key, state, persist, e, chat_id=cid)
+                next_fire[cid] = loop.time() + float(max(wait, 1))
+                continue
+            except Exception as e:
+                if _is_write_forbidden(e):
+                    logger.warning("Нет доступа к отправке в %s: %s", cid, e)
                     if account_key:
-                        health.note_error(account_key, e, chat_id=cid)
-                next_fire[cid] = loop.time() + random_interval_seconds(state, cid)
-                await asyncio.sleep(_GAP)
+                        _record_send_error(account_key, state, persist, e, chat_id=cid)
+                    next_fire[cid] = loop.time() + _FORBIDDEN_BACKOFF_SEC
+                    await asyncio.sleep(_GAP)
+                    continue
+                if _is_bad_peer(e):
+                    logger.warning("Некорректный peer %s, чат отключён: %s", cid, e)
+                    if account_key:
+                        _record_send_error(account_key, state, persist, e, chat_id=cid)
+                    c4 = state.cfg(cid)
+                    c4.enabled = False
+                    state.set_cfg(cid, c4)
+                    persist()
+                    del next_fire[cid]
+                    await asyncio.sleep(_GAP)
+                    continue
+                logger.warning("Отправка в %s: %s", cid, e)
+                if account_key:
+                    _record_send_error(account_key, state, persist, e, chat_id=cid)
+            next_fire[cid] = loop.time() + random_interval_seconds(state, cid)
+            await asyncio.sleep(_GAP)
         except asyncio.CancelledError:
             raise
         except Exception as e:
