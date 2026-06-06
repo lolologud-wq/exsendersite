@@ -8,8 +8,13 @@ from telethon import TelegramClient
 from bot_api import serve_bot_api
 from bot_service import BotService
 from inviter.service import InviterService
+from health import restore_from_persisted
 from spam_scheduler import start_spam_loop_background
-from state import load_multi_account_state, save_multi_account_state
+from state import (
+    load_multi_account_state,
+    prune_phantom_default_slot,
+    save_multi_account_state,
+)
 from telethon_accounts import connect_client_with_fallback, make_telethon_client
 from telethon_client_profile import get_telegram_api_config
 
@@ -75,6 +80,19 @@ async def run_control_bot_forever(
 
 async def main() -> None:
     multi = load_multi_account_state()
+    if prune_phantom_default_slot(multi):
+        save_multi_account_state(multi)
+        logger.info("Удалён пустой слот 'default' (не задан в ACCOUNTS).")
+
+    for aid, st in multi.accounts.items():
+        restore_from_persisted(
+            aid,
+            errors_total=int(st.errors_total or 0),
+            last_error=st.last_error or "",
+            last_error_kind=st.last_error_kind or "",
+            last_error_at=float(st.last_error_at or 0),
+            last_error_chat_id=st.last_error_chat_id,
+        )
 
     if os.getenv("STOP_SPAM_ON_START", "").strip().lower() in (
         "1",

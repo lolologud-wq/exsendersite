@@ -8,18 +8,21 @@ from telethon.tl.types import Channel, Chat, User
 
 async def list_group_chats(client: TelegramClient) -> list[tuple[int, str]]:
     rows: list[tuple[int, str]] = []
-    async for dialog in client.iter_dialogs():
+    # Groups and legacy chats only — skip users and broadcast channels early.
+    async for dialog in client.iter_dialogs(ignore_migrated=True):
         e = dialog.entity
         if isinstance(e, User):
             continue
         if isinstance(e, Channel):
             if getattr(e, "broadcast", False):
                 continue
-            title = (e.title or "").strip() or str(e.id)
         elif isinstance(e, Chat):
-            title = (e.title or "").strip() or str(e.id)
+            pass
         else:
             continue
+        title = (getattr(e, "title", None) or dialog.name or "").strip()
+        if not title:
+            title = str(dialog.id)
         rows.append((dialog.id, title))
     rows.sort(key=lambda x: x[1].casefold())
     return rows

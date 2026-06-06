@@ -108,6 +108,10 @@ class RuntimeState:
     global_source_channel_id: Optional[int] = None
     global_source_message_id: Optional[int] = None
     errors_total: int = 0
+    last_error: str = ""
+    last_error_kind: str = ""
+    last_error_at: float = 0.0
+    last_error_chat_id: Optional[int] = None
     # Bumped when interval settings change — spam_loop clears per-chat timers.
     interval_seq: int = 0
     # Wall-clock timestamp of last send on this account (survives restart/redeploy).
@@ -175,6 +179,14 @@ def _runtime_state_from_flat_dict(raw: dict[str, Any]) -> RuntimeState:
         global_source_channel_id=(int(gch) if gch is not None else None),
         global_source_message_id=(int(gmid) if gmid is not None else None),
         errors_total=int(raw.get("errors_total", 0) or 0),
+        last_error=str(raw.get("last_error", "") or ""),
+        last_error_kind=str(raw.get("last_error_kind", "") or ""),
+        last_error_at=float(raw.get("last_error_at", 0) or 0),
+        last_error_chat_id=(
+            int(raw["last_error_chat_id"])
+            if raw.get("last_error_chat_id") is not None
+            else None
+        ),
         interval_seq=int(raw.get("interval_seq", 0) or 0),
         last_send_at=float(raw.get("last_send_at", 0) or 0),
         chat_configs=chat_configs,
@@ -331,14 +343,51 @@ def default_account_ids_from_env() -> list[str]:
     """Return list of slot ids requested via ACCOUNTS env.
 
     If ACCOUNTS is explicitly set (even to empty string) — respect it as-is.
-    If ACCOUNTS is unset at all — keep legacy behaviour with a single 'default'
-    slot to avoid breaking standalone bot.py runs.
+    If ACCOUNTS is unset: deployed bots (BOT_API_TOKEN / BOT_API_ENABLED) start
+    with zero slots; standalone local runs keep legacy 'default' for dev.
     """
     raw_env = os.getenv("ACCOUNTS")
     if raw_env is None:
+        api_on = os.getenv("BOT_API_ENABLED", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        if api_on and (
+            os.getenv("BOT_API_TOKEN", "").strip()
+            or os.path.isfile(
+                os.path.join(os.path.dirname(__file__), "bot_api_token.txt")
+            )
+        ):
+            return []
         return ["default"]
     parts = [x.strip() for x in raw_env.split(",") if x.strip()]
     return parts
+
+
+def prune_phantom_default_slot(multi: MultiAccountState) -> bool:
+    """Drop empty legacy 'default' slot when ACCOUNTS env does not request it."""
+    env_ids = default_account_ids_from_env()
+    if "default" in env_ids or "default" not in multi.accounts:
+        return False
+    st = multi.accounts["default"]
+    if st.spam_running or st.proxy or st.default_message or st.chat_configs:
+        return False
+    if st.global_source_channel_id is not None:
+        return False
+    sessions_dir = os.path.join(os.path.dirname(__file__), "sessions")
+    legacy = os.path.join(os.path.dirname(__file__), "userbot_session.session")
+    default_sess = os.path.join(sessions_dir, "default.session")
+    if os.path.isfile(legacy) or os.path.isfile(default_sess):
+        return False
+    multi.accounts.pop("default", None)
+    multi.account_order = [x for x in multi.account_order if x != "default"]
+    if multi.active_account_id == "default":
+        multi.active_account_id = (
+            multi.account_order[0] if multi.account_order else ""
+        )
+    return True
 
 
 def load_state() -> RuntimeState:
@@ -441,18 +490,18 @@ def validate_spam_start(state: RuntimeState, client_connected: bool) -> tuple[bo
             if ci is None or ci <= 0:
                 return (
                     False,
-                    "Задайте стандартный интервал &gt; 0 (Настройки) или свой интервал для каждого включённого чата.",
+                    "Задайте стандартный интервал > 0 (Настройки) или свой интервал для каждого включённого чата.",
                 )
     for cid in ids:
         if effective_interval_min(state, cid) <= 0:
-            return False, f"Интервал для чата <code>{cid}</code> должен быть &gt; 0."
+            return False, f"Интервал для чата {cid} должен быть > 0."
         c = state.cfg(cid)
         if c.source_channel_id is not None:
             continue
         if not chat_has_resolved_text(state, cid):
             return (
                 False,
-                f"Пустой текст для чата <code>{cid}</code>. Задайте стандартный текст, кастомный, варианты, общий или чатовый канал-источник.",
+                f"Пустой текст для чата {cid}. Задайте текст в Настройках, источник (канал/пост) или текст для чата.",
             )
     return True, ""
 

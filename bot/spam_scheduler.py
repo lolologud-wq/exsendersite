@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Один spam_loop на слот (аккаунт), чтобы не дублировать при входе из бота и т.п.
 _spam_loop_started: set[str] = set()
+_spam_loop_tasks: dict[str, asyncio.Task] = {}
 
 _GAP = 1.5
 _FORBIDDEN_BACKOFF_SEC = 3600.0
@@ -81,7 +82,8 @@ def _schedule_next_fire(
         return max(now, last + interval)
     if delay_sec > 0:
         return now + delay_sec
-    return now + random_interval_seconds(state, chat_id)
+    # First send for a chat: fire on next scheduler tick, not after full interval.
+    return now
 
 
 def _is_write_forbidden(e: BaseException) -> bool:
@@ -183,10 +185,25 @@ def start_spam_loop_background(
             await spam_loop(client, state, persist=persist, account_key=account_key)
         finally:
             _spam_loop_started.discard(account_key)
+            _spam_loop_tasks.pop(account_key, None)
 
     loop = asyncio.get_running_loop()
-    loop.create_task(_runner())
+    _spam_loop_tasks[account_key] = loop.create_task(_runner())
     return True
+
+
+def restart_spam_loop_background(
+    client: TelegramClient,
+    state: RuntimeState,
+    persist: Callable[[], None],
+    account_key: str,
+) -> bool:
+    """Перезапускает spam_loop (нужно после смены Telethon-клиента или старта спама)."""
+    old = _spam_loop_tasks.pop(account_key, None)
+    if old and not old.done():
+        old.cancel()
+    _spam_loop_started.discard(account_key)
+    return start_spam_loop_background(client, state, persist, account_key)
 
 
 def _record_send_error(
@@ -200,6 +217,10 @@ def _record_send_error(
     if account_key:
         health.note_error(account_key, err, chat_id=chat_id)
     state.errors_total = int(state.errors_total or 0) + 1
+    state.last_error = str(err)[:200]
+    state.last_error_kind = type(err).__name__
+    state.last_error_at = time.time()
+    state.last_error_chat_id = chat_id
     persist()
 
 
@@ -298,7 +319,16 @@ async def spam_loop(
                 else:
                     text, entities = plan.text, plan.entities
                     if not text:
-                        logger.warning("Пустой текст, пропуск %s", cid)
+                        msg = f"Пустой текст для чата {cid} — задайте сообщение или источник в Настройках"
+                        logger.warning("%s", msg)
+                        if account_key:
+                            _record_send_error(
+                                account_key,
+                                state,
+                                persist,
+                                RuntimeError(msg),
+                                chat_id=cid,
+                            )
                         next_fire[cid] = _schedule_next_fire(state, cid)
                         continue
                     if entities:

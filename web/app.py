@@ -1096,6 +1096,19 @@ def create_app() -> FastAPI:
 
     # ===================================================== proxy to bot API
     PROXY_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
+    PROXY_DIALOGS_TIMEOUT = httpx.Timeout(180.0, connect=15.0)
+    PROXY_AUTH_TIMEOUT = httpx.Timeout(90.0, connect=15.0)
+    PROXY_CHATS_TIMEOUT = httpx.Timeout(90.0, connect=15.0)
+
+    def _proxy_timeout_for(sub: str) -> httpx.Timeout:
+        norm = sub.strip("/").lower()
+        if "/dialogs" in norm or norm.endswith("/dialogs") or "/channels" in norm:
+            return PROXY_DIALOGS_TIMEOUT
+        if "/auth/" in norm:
+            return PROXY_AUTH_TIMEOUT
+        if "/chats" in norm or "/spam" in norm:
+            return PROXY_CHATS_TIMEOUT
+        return PROXY_TIMEOUT
 
     async def _proxy(bid: str, method: str, sub: str, request: Request) -> Response:
         ident, rec = _require_bot(request, bid)
@@ -1124,7 +1137,7 @@ def create_app() -> FastAPI:
                 content=body if body else None,
                 extra_headers=extra or None,
                 params=dict(request.query_params),
-                timeout=PROXY_TIMEOUT,
+                timeout=_proxy_timeout_for(sub),
             )
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e

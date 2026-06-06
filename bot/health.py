@@ -62,3 +62,25 @@ def snapshot(account_key: str) -> Optional[dict[str, Any]]:
 
 def drop(account_key: str) -> None:
     _state.pop(account_key, None)
+
+
+def restore_from_persisted(
+    account_key: str,
+    *,
+    errors_total: int = 0,
+    last_error: str = "",
+    last_error_kind: str = "",
+    last_error_at: float = 0.0,
+    last_error_chat_id: Optional[int] = None,
+) -> None:
+    """Seed in-memory counters after process restart from runtime_state.json."""
+    if not errors_total and not last_error:
+        return
+    s = _slot(account_key)
+    s["errorsTotal"] = max(int(s.get("errorsTotal") or 0), int(errors_total or 0))
+    persisted_at = float(last_error_at or 0)
+    if last_error and persisted_at >= float(s.get("lastErrorAt") or 0):
+        s["lastError"] = str(last_error)[:200]
+        s["lastErrorKind"] = str(last_error_kind or "")
+        s["lastErrorAt"] = persisted_at
+        s["lastErrorChatId"] = last_error_chat_id

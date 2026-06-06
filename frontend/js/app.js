@@ -44,6 +44,10 @@ const STATE = {
   activityCache: null,
   chatsLoading: false,
   chatsDialogsCache: new Map(),
+  chatsRefreshGen: 0,
+  chatsInflightToggles: new Set(),
+  chatsEnabledLocal: new Map(),
+  chatsBulkBusy: false,
   botsLoadedAt: 0,
   dashboardPolls: 0,
 };
@@ -93,8 +97,42 @@ function canAddTrialAccount(slotId, botId) {
   return true;
 }
 
-const CHATS_CACHE_TTL_MS = 120_000;
-const CHATS_FETCH_CONCURRENCY = 4;
+const CHATS_CACHE_TTL_MS = 600_000;
+const CHATS_FETCH_CONCURRENCY = 2;
+const CHATS_TOGGLE_CONCURRENCY = 1;
+
+function normalizeProxyKey(proxy) {
+  return String(proxy || "").trim().toLowerCase();
+}
+
+function countAccountsOnProxy(proxy, exclude = null) {
+  const key = normalizeProxyKey(proxy);
+  if (!key) return 0;
+  return flattenAccounts().filter((a) => {
+    if (exclude && a.botId === exclude.botId && a.id === exclude.accountId) return false;
+    const raw = a.rawProxy || a.proxy || "";
+    return normalizeProxyKey(raw) === key;
+  }).length;
+}
+
+function confirmManyOnProxy(proxy, exclude = null) {
+  const n = countAccountsOnProxy(proxy, exclude);
+  if (n < 2) return true;
+  return window.confirm(
+    `На этот прокси уже привязано ${n} аккаунта.\n\n`
+    + "Больше 2 аккаунтов на один прокси повышает риск блокировки Telegram.\n\n"
+    + "Всё равно продолжить?",
+  );
+}
+
+function decodeApiError(msg) {
+  return String(msg || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
 
 // =======================================================
 //  HTTP — site API
@@ -115,7 +153,7 @@ const CHATS_FETCH_CONCURRENCY = 4;
   if (!res.ok) {
     let msg = data?.error || data?.detail || `HTTP ${res.status}`;
     if (typeof msg !== "string") msg = JSON.stringify(msg);
-    throw new Error(msg);
+    throw new Error(decodeApiError(msg));
   }
   return data;
 }
@@ -135,6 +173,25 @@ function botProxyUrl(sub, botId) {
 
 async function botApi(method, sub, body, botId) {
   return siteApi(method, botProxyUrl(sub, botId), body);
+}
+
+function isNetworkFetchError(e) {
+  const msg = String(e?.message || e).toLowerCase();
+  return msg.includes("failed to fetch") || msg.includes("networkerror") || msg.includes("load failed");
+}
+
+async function botApiRetry(method, sub, body, botId, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await botApi(method, sub, body, botId);
+    } catch (e) {
+      last = e;
+      if (!isNetworkFetchError(e) || i >= tries - 1) throw e;
+      await new Promise((r) => setTimeout(r, 600 * (i + 1)));
+    }
+  }
+  throw last;
 }
 
 async function fetchOverviewForBot(botId) {
@@ -164,8 +221,8 @@ const deleteSlot         = (aid, botId)        => botApi("DELETE", `/accounts/${
 const activateSlot       = (aid, botId)        => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/activate`, {}, botId);
 const patchSlot          = (aid, body, botId)  => botApi("PATCH",  `/accounts/${encodeURIComponent(aid)}`, body, botId);
 const setSpam            = (aid, running, botId) => botApi("POST", `/accounts/${encodeURIComponent(aid)}/spam`, { running }, botId);
-const patchChat          = (aid, cid, body, botId) => botApi("PATCH", `/accounts/${encodeURIComponent(aid)}/chats/${encodeURIComponent(cid)}`, body, botId);
-const bulkSetChats       = (aid, body, botId)  => botApi("PATCH",  `/accounts/${encodeURIComponent(aid)}/chats/bulk`, body, botId);
+const patchChat          = (aid, cid, body, botId) => botApiRetry("PATCH", `/accounts/${encodeURIComponent(aid)}/chats/${encodeURIComponent(cid)}`, body, botId);
+const bulkSetChats       = (aid, body, botId)  => botApiRetry("PATCH",  `/accounts/${encodeURIComponent(aid)}/chats/bulk`, body, botId);
 const removeChat         = (aid, cid, botId)   => botApi("DELETE", `/accounts/${encodeURIComponent(aid)}/chats/${encodeURIComponent(cid)}`, undefined, botId);
 const authSendCode       = (aid, phone, botId) => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/auth/send_code`, { phone }, botId);
 const authSignIn         = (aid, code, pwd, botId) => botApi("POST", `/accounts/${encodeURIComponent(aid)}/auth/sign_in`, { code, password: pwd || undefined }, botId);
@@ -558,9 +615,10 @@ function renderActiveCard(ov) {
   document.getElementById("activeStatus").innerHTML = healthBadge(acc, { inlineError: false });
 
   const errEl = document.getElementById("activeError");
+  const errTotal = accountErrorsTotal(acc);
   const errText = acc.health?.lastError
     ? `${acc.health.lastErrorKind || "error"}: ${acc.health.lastError}`
-    : "";
+    : (errTotal > 0 ? `ошибок отправки: ${fmtNumber(errTotal)}` : "");
   if (errEl) {
     if (errText) {
       errEl.hidden = false;
@@ -1241,12 +1299,18 @@ function healthBadge(acc, { inlineError = true } = {}) {
     h.lastSendAt ? `последняя отправка: ${fmtRelAgo(h.lastSendAt)}` : "",
     h.sendsTotal ? `всего отправок: ${h.sendsTotal}` : "",
   ].filter(Boolean).join(" · ");
+  const errCount = accountErrorsTotal(acc);
+  const errCountBadge = errCount > 0
+    ? ` <span class="badge badge-failed" style="margin-left:4px;font-size:10px;" title="Всего ошибок отправки">⚠ ${fmtNumber(errCount)}</span>`
+    : "";
   const sub = h.lastError && inlineError
     ? `<div class="health-error" title="${escapeHtml(fullErr)}">${escapeHtml(fullErr)}</div>`
-    : (!h.lastError && h.lastSendAt
-        ? `<div class="cell-mute" style="margin-top:4px; font-size: 11px;">отправка ${escapeHtml(fmtRelAgo(h.lastSendAt))}</div>`
-        : "");
-  return `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(h.label)}</span>${sub}`;
+    : (!h.lastError && errCount > 0 && inlineError
+        ? `<div class="health-error" title="Ошибки при отправке">ошибок: ${fmtNumber(errCount)}</div>`
+        : (!h.lastError && h.lastSendAt
+            ? `<div class="cell-mute" style="margin-top:4px; font-size: 11px;">отправка ${escapeHtml(fmtRelAgo(h.lastSendAt))}</div>`
+            : ""));
+  return `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(h.label)}</span>${errCountBadge}${sub}`;
 }
 
 // kept for backwards-compat / unused
@@ -1370,8 +1434,8 @@ function closeModal() {
 function modalActions(submitLabel, opts = {}) {
   const danger = opts.danger ? "btn-danger" : "btn-primary";
   return `
-    <button class="btn-ghost" data-modal-close>Отмена</button>
-    <button class="${danger}" id="modalSubmit">${escapeHtml(submitLabel)}</button>
+    <button type="button" class="btn-ghost" data-modal-close>Отмена</button>
+    <button type="button" class="${danger}" id="modalSubmit">${escapeHtml(submitLabel)}</button>
   `;
 }
 
@@ -1395,7 +1459,7 @@ function openAddSlotModal() {
           <input class="input mono" name="id" placeholder="например, alex42" pattern="[a-zA-Z][a-zA-Z0-9_-]{0,31}" required />
           <span class="field-hint">латиница/цифры/«_»/«-», 1–32 символа, первая буква</span>
         </label>
-        ${proxyFieldHtml("proxy", "login:pass@host:port или socks5://…")}
+        ${proxyFieldHtml("proxy", "login:pass@host:port (опционально)")}
         <div class="field-row">
           <label class="field">
             <span class="field-label">Интервал, мин</span>
@@ -1424,8 +1488,17 @@ function openAddSlotModal() {
     return f ? String(new FormData(f).get("botId") || "").trim() : defaultBotId();
   });
 
-  document.getElementById("modalSubmit").addEventListener("click", async () => {
+  const form = document.getElementById("addSlotForm");
+  form?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    document.getElementById("modalSubmit")?.click();
+  });
+
+  bindModalSubmit(async () => {
     const f = document.getElementById("addSlotForm");
+    if (!f) { toastErr(new Error("Форма не найдена — перезагрузи страницу")); return; }
+    if (!f.reportValidity()) return;
+
     const fd = new FormData(f);
     const botId = String(fd.get("botId") || "").trim();
     if (!botId) { toastErr(new Error("Выбери VDS")); return; }
@@ -1435,21 +1508,39 @@ function openAddSlotModal() {
       return;
     }
     if (!canAddTrialAccount(slotId, botId)) return;
+    const proxyVal = String(fd.get("proxy") || "").trim();
+    if (proxyVal && !confirmManyOnProxy(proxyVal)) return;
+
+    const btn = document.getElementById("modalSubmit");
+    const btnLabel = btn?.textContent || "Создать";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Создаю…";
+    }
+
     const body = {
       id: slotId,
-      proxy: String(fd.get("proxy") || "").trim() || null,
+      proxy: proxyVal || null,
       intervalMin: fd.get("intervalMin") ? Number(fd.get("intervalMin")) : null,
       intervalJitter: fd.get("intervalJitter") ? Number(fd.get("intervalJitter")) / 100 : null,
       defaultMessage: String(fd.get("defaultMessage") || "").trim() || null,
     };
     Object.keys(body).forEach((k) => body[k] == null && delete body[k]);
+
     try {
       const res = await createSlot(body, botId);
       toastOk(`Слот «${res.id}» создан на ${botLabel(botId)}`);
       closeModal();
-      await refreshCurrentView(true);
       openAuthModal(res.id, botId);
-    } catch (e) { toastErr(e); }
+      refreshCurrentView(true).catch(() => {});
+    } catch (e) {
+      toastErr(e);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = btnLabel;
+      }
+    }
   });
 }
 
@@ -1481,11 +1572,48 @@ async function goToSourcesTab(botId, accountId, chatId) {
 // =======================================================
 function bindModalSubmit(handler) {
   const old = document.getElementById("modalSubmit");
-  if (!old) return;
+  if (!old) return null;
   const btn = old.cloneNode(true);
   old.replaceWith(btn);
   btn.addEventListener("click", handler);
   return btn;
+}
+
+function bindModalFormSubmit(formId, handler) {
+  const btn = bindModalSubmit(handler);
+  document.getElementById(formId)?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    btn?.click();
+  });
+  return btn;
+}
+
+function setModalSubmitLoading(btn, loading, idleLabel) {
+  if (!btn) return;
+  if (loading) {
+    if (!btn.dataset.idleLabel) btn.dataset.idleLabel = btn.textContent || idleLabel || "";
+    btn.disabled = true;
+    btn.textContent = "Отправляю…";
+  } else {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.idleLabel || idleLabel || btn.textContent;
+    delete btn.dataset.idleLabel;
+  }
+}
+
+async function resolveAuthProxy(aid, botId) {
+  const input = document.querySelector('#authForm input[name="authProxy"]');
+  const fromForm = String(input?.value || "").trim();
+  if (fromForm) return fromForm;
+  const cached = findAccount(aid, botId);
+  if (cached?.rawProxy) return String(cached.rawProxy).trim();
+  if (cached?.hasProxy && cached?.proxy) return String(cached.proxy).trim();
+  try {
+    const acc = await fetchAccount(aid, botId);
+    return String(acc?.rawProxy || acc?.proxy || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 function openAuthModal(aid, botId) {
@@ -1495,6 +1623,7 @@ function openAuthModal(aid, botId) {
   const flow = { step: "phone", phone: "" };
 
   function renderPhone() {
+    const presetProxy = findAccount(aid, bid)?.rawProxy || "";
     openModal({
       title: `Вход в Telegram: ${aid}`,
       body: `
@@ -1505,17 +1634,30 @@ function openAuthModal(aid, botId) {
             <input class="input mono" id="authPhone" type="tel" placeholder="+79001234567" required />
             <span class="field-hint">Международный формат с «+»</span>
           </label>
+          ${proxyFieldHtml("authProxy", "login:pass@host:port (опционально)")}
+          <div class="callout">Прокси опционален. Без него код может не прийти с IP VDS — тогда укажи мобильный/резидентский прокси.</div>
         </form>
       `,
       footer: modalActions("Отправить код"),
     });
+    const proxyInput = document.querySelector('#authForm input[name="authProxy"]');
+    if (proxyInput && presetProxy) proxyInput.value = presetProxy;
+    bindProxyCheckIn(document.getElementById("modalBody"), () => bid);
     setTimeout(() => document.getElementById("authPhone")?.focus(), 50);
-    bindModalSubmit(async () => {
+    bindModalFormSubmit("authForm", async () => {
+      const form = document.getElementById("authForm");
+      if (!form?.reportValidity()) return;
       const phone = document.getElementById("authPhone")?.value.trim();
       if (!phone) { toastErr(new Error("Введи номер телефона")); return; }
+      const proxyVal = await resolveAuthProxy(aid, bid);
       const btn = document.getElementById("modalSubmit");
-      btn.disabled = true;
+      setModalSubmitLoading(btn, true, "Отправить код");
       try {
+        const cached = findAccount(aid, bid);
+        const cachedProxy = String(cached?.rawProxy || "").trim();
+        if (proxyVal !== cachedProxy) {
+          await patchSlot(aid, { proxy: proxyVal || null }, bid);
+        }
         await authSendCode(aid, phone, bid);
         flow.phone = phone;
         flow.step = "code";
@@ -1524,7 +1666,7 @@ function openAuthModal(aid, botId) {
       } catch (e) {
         toastErr(e);
       } finally {
-        btn.disabled = false;
+        setModalSubmitLoading(btn, false, "Отправить код");
       }
     });
   }
@@ -1545,21 +1687,23 @@ function openAuthModal(aid, botId) {
       </form>
     `;
     document.getElementById("modalFoot").innerHTML = `
-      <button class="btn-ghost" id="authBackBtn">← Назад</button>
-      <button class="btn-ghost" data-modal-close>Отмена</button>
-      <button class="btn-primary" id="modalSubmit">Войти</button>
+      <button type="button" class="btn-ghost" id="authBackBtn">← Назад</button>
+      <button type="button" class="btn-ghost" data-modal-close>Отмена</button>
+      <button type="button" class="btn-primary" id="modalSubmit">Войти</button>
     `;
     document.getElementById("authBackBtn")?.addEventListener("click", () => {
       flow.step = "phone";
       renderPhone();
     });
     setTimeout(() => document.getElementById("authCode")?.focus(), 50);
-    bindModalSubmit(async () => {
+    bindModalFormSubmit("authForm", async () => {
+      const form = document.getElementById("authForm");
+      if (!form?.reportValidity()) return;
       const code = document.getElementById("authCode")?.value.trim();
       if (!code) { toastErr(new Error("Введи код")); return; }
       const pwd = document.getElementById("auth2faInline")?.value.trim() || null;
       const btn = document.getElementById("modalSubmit");
-      btn.disabled = true;
+      setModalSubmitLoading(btn, true, "Войти");
       try {
         const res = await authSignIn(aid, code, pwd, bid);
         if (res.need2FA) {
@@ -1569,12 +1713,13 @@ function openAuthModal(aid, botId) {
           return;
         }
         toastOk(`Вошли как @${res.tgUsername || res.tgUserId || aid}`);
+        toast("Включи чаты и нажми ▶ у аккаунта, чтобы запустить рассылку", "info", 7000);
         closeModal();
         refreshCurrentView(true);
       } catch (e) {
         toastErr(e);
       } finally {
-        btn.disabled = false;
+        setModalSubmitLoading(btn, false, "Войти");
       }
     });
   }
@@ -1592,20 +1737,23 @@ function openAuthModal(aid, botId) {
     `;
     document.getElementById("modalFoot").innerHTML = modalActions("Подтвердить");
     setTimeout(() => document.getElementById("auth2faPwd")?.focus(), 50);
-    bindModalSubmit(async () => {
+    bindModalFormSubmit("authForm", async () => {
+      const form = document.getElementById("authForm");
+      if (!form?.reportValidity()) return;
       const password = document.getElementById("auth2faPwd")?.value.trim();
       if (!password) { toastErr(new Error("Введи пароль 2FA")); return; }
       const btn = document.getElementById("modalSubmit");
-      btn.disabled = true;
+      setModalSubmitLoading(btn, true, "Подтвердить");
       try {
         const res = await auth2FA(aid, password, bid);
         toastOk(`Вошли как @${res.tgUsername || res.tgUserId || aid}`);
+        toast("Включи чаты и нажми ▶ у аккаунта, чтобы запустить рассылку", "info", 7000);
         closeModal();
         refreshCurrentView(true);
       } catch (e) {
         toastErr(e);
       } finally {
-        btn.disabled = false;
+        setModalSubmitLoading(btn, false, "Подтвердить");
       }
     });
   }
@@ -1673,10 +1821,12 @@ function openUploadSessionModal(presetSlotId, presetFile) {
     if (!canAddTrialAccount(slotId, botId)) return;
     const file = presetFile || fd.get("sessionFile");
     if (!file || !file.size) { toastErr(new Error("Выбери .session файл")); return; }
+    const proxyVal = String(fd.get("proxy") || "").trim();
+    if (proxyVal && !confirmManyOnProxy(proxyVal)) return;
     const btn = document.getElementById("modalSubmit");
     btn.disabled = true;
     try {
-      const res = await uploadSessionFile(slotId, file, String(fd.get("proxy") || "").trim(), botId);
+      const res = await uploadSessionFile(slotId, file, proxyVal, botId);
       if (res.authorized) {
         toastOk(`@${res.tgUsername || slotId} — сессия на ${botLabel(botId)}`);
       } else {
@@ -1769,6 +1919,228 @@ function setChatsLoading(on) {
   if (el) el.hidden = !on;
 }
 
+function chatToggleKey(botId, accountId, chatId) {
+  return `${botId}|${accountId}|${String(chatId)}`;
+}
+
+function chatEnabledEffective(botId, accountId, chat) {
+  const key = chatToggleKey(botId, accountId, chat.chatId);
+  if (STATE.chatsEnabledLocal.has(key)) return !!STATE.chatsEnabledLocal.get(key);
+  return !!chat.enabled;
+}
+
+function setChatEnabledLocal(botId, accountId, chatId, enabled) {
+  STATE.chatsEnabledLocal.set(chatToggleKey(botId, accountId, chatId), !!enabled);
+}
+
+function clearChatEnabledLocal(botId, accountId, chatId) {
+  STATE.chatsEnabledLocal.delete(chatToggleKey(botId, accountId, chatId));
+}
+
+let autoStartSpamTimer = null;
+
+function scheduleAutoStartSpam(botId, accountId) {
+  if (STATE.chatsBulkBusy) return;
+  clearTimeout(autoStartSpamTimer);
+  autoStartSpamTimer = setTimeout(() => {
+    tryAutoStartSpam(botId, accountId).catch(() => {});
+  }, 900);
+}
+
+async function syncEnabledChatsBeforeSpam(botId, accountId) {
+  const localRows = STATE.allChats.filter(
+    (r) => r.botId === botId && r.accountId === accountId
+      && chatEnabledEffective(r.botId, r.accountId, r.chat),
+  );
+  if (!localRows.length) {
+    const acc = await fetchAccount(accountId, botId).catch(() => null);
+    return acc?.chats?.enabled || 0;
+  }
+
+  const acc = await fetchAccount(accountId, botId);
+  const serverOn = new Set(
+    (acc.chatList || []).filter((c) => c.enabled).map((c) => String(c.chatId)),
+  );
+  const toEnable = localRows
+    .map((r) => String(r.chat.chatId))
+    .filter((cid) => !serverOn.has(cid));
+
+  if (toEnable.length) {
+    try {
+      await bulkSetChats(accountId, { enabled: true, chatIds: toEnable }, botId);
+    } catch (_) {
+      for (const cid of toEnable) {
+        try {
+          await patchChat(accountId, cid, { enabled: true }, botId);
+        } catch (e2) {
+          console.warn("sync enable failed", cid, e2);
+        }
+      }
+    }
+    for (const cid of toEnable) {
+      syncChatPatchLocal(botId, accountId, cid, { enabled: true, configured: true });
+    }
+  }
+
+  const fresh = await fetchAccount(accountId, botId);
+  return fresh?.chats?.enabled || 0;
+}
+
+async function startSpamForAccount(botId, accountId, opts = {}) {
+  const { quiet = false } = opts;
+  const acc = findAccount(accountId, botId);
+  if (acc?.spamRunning) return true;
+
+  const enabledN = await syncEnabledChatsBeforeSpam(botId, accountId);
+  if (!enabledN) {
+    throw new Error("На VDS нет включённых чатов — включи чаты в разделе «Чаты» и повтори");
+  }
+
+  const fresh = await fetchAccount(accountId, botId);
+  if (fresh && fresh.authorized === false) {
+    throw new Error("Аккаунт не авторизован в Telegram — войди по телефону или загрузи .session");
+  }
+  const hasText = String(fresh?.defaultMessage || "").trim();
+  const hasSource = fresh?.globalSourceChannelId != null;
+  const hasChatCustom = (fresh?.chatList || []).some(
+    (c) => c.enabled && (
+      String(c.customMessage || "").trim()
+      || (c.textVariants && c.textVariants.length)
+      || c.sourceChannelId != null
+    ),
+  );
+  if (!hasText && !hasSource && !hasChatCustom) {
+    throw new Error("Нет текста для рассылки — в Настройках укажи сообщение или источник (канал/пост)");
+  }
+
+  await botApiRetry(
+    "POST",
+    `/accounts/${encodeURIComponent(accountId)}/spam`,
+    { running: true },
+    botId,
+  );
+  if (!quiet) toastOk(`${accountId}: рассылка запущена`);
+  await fetchAllOverviews().catch(() => {});
+  return true;
+}
+
+async function tryAutoStartSpam(botId, accountId) {
+  try {
+    await startSpamForAccount(botId, accountId, { quiet: false });
+  } catch (e) {
+    if (isNetworkFetchError(e)) return;
+    toastErr(e);
+  }
+}
+
+/** Keep UI + dialogs cache in sync after PATCH. */
+function syncChatPatchLocal(botId, accountId, chatId, patch) {
+  const cid = String(chatId);
+  if (patch.enabled != null) setChatEnabledLocal(botId, accountId, cid, patch.enabled);
+  const row = STATE.allChats.find(
+    (r) => r.botId === botId && r.accountId === accountId && String(r.chat.chatId) === cid,
+  );
+  if (row) {
+    Object.assign(row.chat, patch);
+    if (patch.enabled != null) row.chat.configured = true;
+  }
+  const cached = STATE.chatsDialogsCache.get(`${botId}:${accountId}`);
+  if (cached?.data) {
+    const chat = cached.data.find((c) => String(c.chatId) === cid);
+    if (chat) {
+      Object.assign(chat, patch);
+      if (patch.enabled != null) chat.configured = true;
+    }
+  }
+}
+
+function syncChatsBulkLocal(botId, accountId, chatIds, enabled) {
+  const idSet = new Set(chatIds.map(String));
+  for (const r of STATE.allChats) {
+    if (r.botId === botId && r.accountId === accountId && idSet.has(String(r.chat.chatId))) {
+      r.chat.enabled = enabled;
+      r.chat.configured = true;
+    }
+  }
+  const cached = STATE.chatsDialogsCache.get(`${botId}:${accountId}`);
+  if (cached?.data) {
+    for (const chat of cached.data) {
+      if (idSet.has(String(chat.chatId))) {
+        chat.enabled = enabled;
+        chat.configured = true;
+      }
+    }
+  }
+}
+
+function updateDialogsCacheFromRows(accounts, rows) {
+  const now = Date.now();
+  for (const a of accounts) {
+    const chats = rows
+      .filter((r) => r.botId === a.botId && r.accountId === a.id)
+      .map((r) => r.chat);
+    if (chats.length) {
+      STATE.chatsDialogsCache.set(`${a.botId}:${a.id}`, { at: now, data: chats });
+    }
+  }
+}
+
+function mergeChatConfigFields(chat, cfg, opts = {}) {
+  if (!cfg) return;
+  const { syncEnabled = true } = opts;
+  if (syncEnabled && cfg.enabled != null) chat.enabled = !!cfg.enabled;
+  if (cfg.customMessage !== undefined) chat.customMessage = cfg.customMessage;
+  if (cfg.textVariants !== undefined) chat.textVariants = cfg.textVariants;
+  if (cfg.extraText !== undefined) chat.extraText = cfg.extraText;
+  if (cfg.customIntervalMin !== undefined) chat.customIntervalMin = cfg.customIntervalMin;
+  if (cfg.customIntervalJitter !== undefined) chat.customIntervalJitter = cfg.customIntervalJitter;
+  if (cfg.sourceChannelId !== undefined) chat.sourceChannelId = cfg.sourceChannelId;
+  if (cfg.sourceMessageId !== undefined) chat.sourceMessageId = cfg.sourceMessageId;
+  if (cfg.sourceForward !== undefined) chat.sourceForward = cfg.sourceForward;
+  if (cfg.messageLimit !== undefined) chat.messageLimit = cfg.messageLimit;
+  if (cfg.messagesSent !== undefined) chat.messagesSent = cfg.messagesSent;
+  if (cfg.startDelayMin !== undefined) chat.startDelayMin = cfg.startDelayMin;
+  chat.configured = true;
+}
+
+/** Sync persisted chat settings; enabled only when syncEnabled (full refresh). */
+async function mergeAccountChatConfigs(accounts, rows, opts = {}) {
+  const { syncEnabled = true } = opts;
+  await mapPool(accounts, CHATS_FETCH_CONCURRENCY, async (a) => {
+    try {
+      const acc = await fetchAccount(a.id, a.botId);
+      const cfgById = new Map((acc.chatList || []).map((c) => [String(c.chatId), c]));
+      for (const row of rows) {
+        if (row.botId !== a.botId || row.accountId !== a.id) continue;
+        const cid = String(row.chat.chatId);
+        const tKey = chatToggleKey(a.botId, a.id, cid);
+        if (STATE.chatsInflightToggles.has(tKey)) continue;
+        if (STATE.chatsEnabledLocal.has(tKey)) {
+          row.chat.enabled = !!STATE.chatsEnabledLocal.get(tKey);
+        }
+        const cfg = cfgById.get(cid);
+        if (!cfg) continue;
+        const prevTitle = row.chat.title;
+        mergeChatConfigFields(row.chat, cfg, { syncEnabled });
+        if (STATE.chatsEnabledLocal.has(tKey)) {
+          row.chat.enabled = !!STATE.chatsEnabledLocal.get(tKey);
+        }
+        if (syncEnabled && cfg.enabled != null && cfg.enabled === STATE.chatsEnabledLocal.get(tKey)) {
+          clearChatEnabledLocal(a.botId, a.id, cid);
+        }
+        const cfgTitle = (cfg.title || "").trim();
+        if (prevTitle && prevTitle !== cid) {
+          row.chat.title = prevTitle;
+        } else if (cfgTitle && cfgTitle !== cid) {
+          row.chat.title = cfgTitle;
+        }
+      }
+    } catch (e) {
+      console.warn("merge chat configs", a.id, e);
+    }
+  });
+}
+
 async function mapPool(items, limit, fn) {
   if (!items.length) return [];
   const results = new Array(items.length);
@@ -1802,7 +2174,8 @@ function getFilteredChatRows() {
 }
 
 function updateChatsBulkUi(rows) {
-  const enabled = rows.filter((r) => r.chat.enabled).length;
+  if (STATE.chatsBulkBusy) return;
+  const enabled = rows.filter((r) => chatEnabledEffective(r.botId, r.accountId, r.chat)).length;
   const countEl = document.getElementById("chatsCount");
   if (countEl) countEl.textContent = `${enabled} вкл / ${rows.length} чатов`;
 
@@ -1834,7 +2207,7 @@ function chatSourceCell(c) {
 }
 
 function allChatRow(row) {
-  const c = row.chat;
+  const c = { ...row.chat, enabled: chatEnabledEffective(row.botId, row.accountId, row.chat) };
   const interval = c.customIntervalMin
     ? `${fmtMinutes(c.customIntervalMin)}${fmtJitter(c.customIntervalJitter)}`
     : '<span class="cell-mute">—</span>';
@@ -1842,8 +2215,9 @@ function allChatRow(row) {
   const limit = c.messageLimit != null
     ? `<span class="mono cell-dim">${c.messagesSent || 0}/${c.messageLimit}</span>`
     : `<span class="mono cell-dim">${c.messagesSent || 0}</span>`;
-  const title = c.title && c.title !== c.chatId
-    ? `<div class="cell-strong">${escapeHtml(c.title)}</div>`
+  const name = (c.title || "").trim();
+  const title = name && name !== String(c.chatId)
+    ? `<div class="cell-strong">${escapeHtml(name)}</div>`
     : "";
   return `
     <tr class="chat-row" data-cid="${escapeHtml(c.chatId)}" data-bot="${escapeHtml(row.botId)}" data-aid="${escapeHtml(row.accountId)}">
@@ -1947,15 +2321,65 @@ function chatsTargetAccounts() {
 }
 
 async function refreshChats(force = false) {
+  syncChatsFilterSelects();
+  const accounts = chatsTargetAccounts();
+
+  // Periodic poll: keep list as-is, sync only persisted configs from server.
+  if (!force && STATE.allChats.length > 0) {
+    setChatsLoading(true);
+    try {
+      await Promise.all([
+        fetchAllOverviews(),
+        mergeAccountChatConfigs(accounts, STATE.allChats, { syncEnabled: false }),
+      ]);
+      updateDialogsCacheFromRows(accounts, STATE.allChats);
+      renderAllChatsTable();
+    } catch (e) {
+      console.warn("chats light refresh", e);
+    } finally {
+      setChatsLoading(false);
+    }
+    return;
+  }
+
+  const gen = ++STATE.chatsRefreshGen;
   setChatsLoading(true);
   try {
-    await fetchAllOverviews();
-    syncChatsFilterSelects();
+    if (!force) {
+      const cachedRows = [];
+      const now = Date.now();
+      for (const a of accounts) {
+        const cacheKey = `${a.botId}:${a.id}`;
+        const cached = STATE.chatsDialogsCache.get(cacheKey);
+        if (cached && now - cached.at < CHATS_CACHE_TTL_MS) {
+          for (const chat of cached.data) {
+            cachedRows.push({ botId: a.botId, botLabel: a.botLabel, accountId: a.id, chat });
+          }
+        }
+      }
+      if (cachedRows.length) {
+        STATE.allChats = cachedRows;
+        renderAllChatsTable();
+      } else {
+        const quickRows = await loadConfiguredChatsForAccounts(accounts);
+        if (quickRows.length) {
+          STATE.allChats = quickRows;
+          renderAllChatsTable();
+        }
+      }
+    }
 
-    const accounts = chatsTargetAccounts();
-    const rows = await loadTelegramDialogsForAccounts(accounts, force);
+    const [, rows] = await Promise.all([
+      fetchAllOverviews(),
+      loadTelegramDialogsForAccounts(accounts, force),
+    ]);
+    if (gen !== STATE.chatsRefreshGen) return;
+
+    await mergeAccountChatConfigs(accounts, rows);
+    if (gen !== STATE.chatsRefreshGen) return;
 
     STATE.allChats = rows;
+    updateDialogsCacheFromRows(accounts, rows);
     renderAllChatsTable();
   } catch (e) {
     if (force) toastErr(e);
@@ -1972,53 +2396,88 @@ async function bulkToggleChats(enabled) {
     return;
   }
 
-  // Group visible rows by (botId, accountId)
   const groups = new Map();
   for (const r of visibleRows) {
     const key = `${r.botId}|${r.accountId}`;
-    if (!groups.has(key)) groups.set(key, { botId: r.botId, accountId: r.accountId, ids: [] });
-    groups.get(key).ids.push(r.chat.chatId);
+    if (!groups.has(key)) groups.set(key, { botId: r.botId, accountId: r.accountId, rows: [] });
+    groups.get(key).rows.push(r);
   }
-  const tasks = [...groups.values()];
 
+  STATE.chatsRefreshGen++;
+  STATE.chatsBulkBusy = true;
   setChatsLoading(true);
+  let total = 0;
+  const failed = [];
+  const accountsToStart = new Set();
+
   try {
-    let total = 0;
-    const isAccountScope = !!STATE.chatsAccountFilter && tasks.length === 1;
-    await mapPool(tasks, CHATS_FETCH_CONCURRENCY, async (t) => {
-      const body = isAccountScope
-        ? { enabled, forceDialogs: true }
-        : { enabled, chatIds: t.ids };
+    for (const g of groups.values()) {
+      const ids = g.rows.map((r) => String(r.chat.chatId));
+      for (const r of g.rows) {
+        const cid = String(r.chat.chatId);
+        const tKey = chatToggleKey(g.botId, g.accountId, cid);
+        STATE.chatsInflightToggles.add(tKey);
+        setChatEnabledLocal(g.botId, g.accountId, cid, enabled);
+      }
+
       try {
-        const res = await bulkSetChats(t.accountId, body, t.botId);
-        total += res?.count || 0;
-      } catch (e) {
-        if (!t.ids.length) throw e;
-        for (const cid of t.ids) {
+        const res = await bulkSetChats(g.accountId, { enabled, chatIds: ids }, g.botId);
+        const n = res?.count || ids.length;
+        for (const r of g.rows) {
+          syncChatPatchLocal(g.botId, g.accountId, r.chat.chatId, { enabled, configured: true });
+        }
+        total += n;
+        if (enabled) accountsToStart.add(`${g.botId}|${g.accountId}`);
+      } catch (bulkErr) {
+        console.warn("bulkSetChats failed, fallback per chat", g.accountId, bulkErr);
+        await mapPool(g.rows, CHATS_TOGGLE_CONCURRENCY, async (r) => {
+          const cid = String(r.chat.chatId);
           try {
-            await patchChat(t.accountId, cid, { enabled }, t.botId);
+            const res = await patchChat(g.accountId, cid, { enabled }, g.botId);
+            const cfg = res?.config || {};
+            syncChatPatchLocal(g.botId, g.accountId, cid, {
+              enabled: cfg.enabled != null ? !!cfg.enabled : enabled,
+              configured: true,
+            });
             total += 1;
+            if (enabled) accountsToStart.add(`${g.botId}|${g.accountId}`);
           } catch (err) {
-            console.warn("patchChat fallback failed", cid, err);
+            clearChatEnabledLocal(g.botId, g.accountId, cid);
+            failed.push(cid);
+            console.warn("bulk toggle failed", cid, err);
           }
-        }
+        });
       }
-      // Optimistic local update so UI reflects the change immediately
-      for (const r of STATE.allChats) {
-        if (r.botId === t.botId && r.accountId === t.accountId && t.ids.includes(r.chat.chatId)) {
-          r.chat.enabled = enabled;
-          r.chat.configured = true;
-        }
+
+      for (const r of g.rows) {
+        STATE.chatsInflightToggles.delete(chatToggleKey(g.botId, g.accountId, r.chat.chatId));
       }
-    });
+    }
+
     renderAllChatsTable();
-    toastOk(enabled ? `Включено ${total} чатов` : `Выключено ${total} чатов`);
-    STATE.chatsDialogsCache.clear();
-    refreshChats(false).catch(() => {});
-  } catch (e) {
-    toastErr(e);
+    if (failed.length) {
+      const hint = failed.length === visibleRows.length
+        ? "Нет связи с VDS — проверь сервер и авторизацию аккаунта."
+        : `Не удалось переключить ${failed.length} чат(ов).`;
+      toastErr(new Error(hint));
+    }
+    if (total > 0) {
+      toastOk(enabled ? `Включено ${total} чатов` : `Выключено ${total} чатов`);
+      await fetchAllOverviews().catch(() => {});
+      if (enabled) {
+        for (const key of accountsToStart) {
+          const [botId, accountId] = key.split("|");
+          await tryAutoStartSpam(botId, accountId);
+        }
+      }
+    } else if (!failed.length) {
+      toastErr(new Error("Не удалось переключить чаты"));
+    }
   } finally {
+    STATE.chatsBulkBusy = false;
+    STATE.chatsInflightToggles.clear();
     setChatsLoading(false);
+    renderAllChatsTable();
   }
 }
 
@@ -2204,8 +2663,10 @@ async function saveSettingsForm(ev) {
   if (!botId || !accountId) { toastErr(new Error("Выбери VDS и аккаунт")); return; }
   const f = document.getElementById("settingsForm");
   const fd = new FormData(f);
+  const proxyVal = String(fd.get("proxy") || "").trim();
+  if (proxyVal && !confirmManyOnProxy(proxyVal, { botId, accountId })) return;
   const body = {
-    proxy: String(fd.get("proxy") || "").trim(),
+    proxy: proxyVal,
     defaultIntervalMin: Number(fd.get("defaultIntervalMin")),
     defaultIntervalJitter: Number(fd.get("defaultIntervalJitter") || 0) / 100,
     defaultSourceForward: !!fd.get("defaultSourceForward"),
@@ -2515,12 +2976,28 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
     body.customIntervalJitter = jt === "" ? null : Number(jt) / 100;
     body.messageLimit = lim === "" ? null : Number(lim);
     body.startDelayMin = sd === "" ? null : Number(sd);
+    const btn = document.getElementById("modalSubmit");
+    if (btn) btn.disabled = true;
     try {
-      await patchChat(accountId, chatId, body, botId);
+      await patchChat(accountId, String(chatId), body, botId);
+      syncChatPatchLocal(botId, accountId, chatId, {
+        enabled: body.enabled,
+        customMessage: body.customMessage || null,
+        textVariants: body.textVariants,
+        extraText: body.extraText,
+        sourceForward: body.sourceForward,
+        customIntervalMin: body.customIntervalMin,
+        customIntervalJitter: body.customIntervalJitter,
+        messageLimit: body.messageLimit,
+        startDelayMin: body.startDelayMin,
+        configured: true,
+      });
       toastOk("Чат сохранён");
       closeModal();
-      refreshCurrentView(true);
+      renderAllChatsTable();
+      fetchAllOverviews().catch(() => {});
     } catch (e) { toastErr(e); }
+    finally { if (btn) btn.disabled = false; }
   });
 }
 
@@ -2620,11 +3097,18 @@ async function handleRowAction(act, aid, botId) {
   const acc = findAccount(aid, botId) || { id: aid, botId, spamRunning: false };
   switch (act) {
     case "spam": {
+      const bid = botId || acc.botId;
       try {
-        await setSpam(aid, !acc.spamRunning, botId || acc.botId);
-        toastOk(acc.spamRunning ? `${aid}: спам остановлен` : `${aid}: спам запущен`);
+        if (acc.spamRunning) {
+          await setSpam(aid, false, bid);
+          toastOk(`${aid}: спам остановлен`);
+        } else {
+          await startSpamForAccount(bid, aid);
+        }
         refreshCurrentView(true);
-      } catch (e) { toastErr(e); }
+      } catch (e) {
+        toastErr(e);
+      }
       break;
     }
     case "activate": {
@@ -2786,18 +3270,36 @@ function bindChatsTable() {
     const tr = actBtn.closest("tr[data-cid]");
     if (!tr) return;
     const { cid, bot, aid } = tr.dataset;
+    if (!bot || !aid || !cid) {
+      toastErr(new Error("Не найден VDS/аккаунт для чата — обнови страницу"));
+      actBtn.checked = !actBtn.checked;
+      return;
+    }
     const want = actBtn.checked;
+    const toggleKey = chatToggleKey(bot, aid, cid);
+    STATE.chatsRefreshGen++;
+    STATE.chatsInflightToggles.add(toggleKey);
+    setChatEnabledLocal(bot, aid, cid, want);
+    renderAllChatsTable();
     try {
-      await patchChat(aid, cid, { enabled: want }, bot);
-      const row = STATE.allChats.find((r) => r.botId === bot && r.accountId === aid && r.chat.chatId === cid);
-      if (row) {
-        row.chat.enabled = want;
-        row.chat.configured = true;
-      }
+      const res = await patchChat(aid, cid, { enabled: want }, bot);
+      const cfg = res?.config || {};
+      syncChatPatchLocal(bot, aid, cid, {
+        enabled: cfg.enabled != null ? !!cfg.enabled : want,
+        configured: true,
+      });
       renderAllChatsTable();
+      fetchAllOverviews().catch(() => {});
+      if (want && !STATE.chatsBulkBusy) scheduleAutoStartSpam(bot, aid);
     } catch (err) {
+      clearChatEnabledLocal(bot, aid, cid);
       actBtn.checked = !want;
-      toastErr(err);
+      renderAllChatsTable();
+      toastErr(isNetworkFetchError(err)
+        ? new Error("Нет связи с VDS — подожди и попробуй снова")
+        : err);
+    } finally {
+      STATE.chatsInflightToggles.delete(toggleKey);
     }
   });
 }

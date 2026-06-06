@@ -217,11 +217,14 @@ def _systemd_restart_timer(interval: str) -> str:
     return (
         "[Unit]\n"
         "Description=Periodic userbot restart\n"
+        "After=userbot.service\n"
         "\n"
         "[Timer]\n"
         f"OnBootSec={interval}\n"
         f"OnUnitActiveSec={interval}\n"
+        "AccuracySec=1min\n"
         "Persistent=true\n"
+        "Unit=userbot-restart.service\n"
         "\n"
         "[Install]\n"
         "WantedBy=timers.target\n"
@@ -287,6 +290,21 @@ async def _install_userbot_restart_timer(
         sudo=sudo,
         sudo_password=sudo_password,
     )
+    verify = await _run(
+        conn,
+        "systemctl is-enabled userbot-restart.timer 2>/dev/null; "
+        "systemctl list-timers userbot-restart.timer --no-pager 2>/dev/null | tail -n 2",
+        st,
+        sudo=sudo,
+        sudo_password=sudo_password,
+        check=False,
+    )
+    out = (verify.stdout or "").strip()
+    first = (out.splitlines()[0] if out else "").strip().lower()
+    if first != "enabled":
+        st.add("! Таймер перезапуска не включился — проверь systemd на VDS")
+    elif len(out.splitlines()) > 1:
+        st.add(out.splitlines()[-1])
 
 
 # -------------------------------------------------------------- ssh
@@ -532,7 +550,7 @@ async def deploy(
                     st.add(f"Порт {rec.api_port} занят (часто Apache) → используем {api_port}")
                     registry.update(bid, api_port=api_port)
                     rec = registry.get(bid) or rec
-                full_env = _normalize_bot_env(env, token, api_port)
+                full_env = _normalize_bot_env(deploy_env, token, api_port)
 
                 # 1) deploy key
                 pub = _ensure_deploy_key()

@@ -33,7 +33,7 @@ from control_bot import (
     _telethon_ready,
 )
 from proxy_util import parse_proxy
-from spam_scheduler import start_spam_loop_background
+from spam_scheduler import restart_spam_loop_background, start_spam_loop_background
 from state import (
     ChatSpamConfig,
     MultiAccountState,
@@ -41,7 +41,7 @@ from state import (
     save_multi_account_state,
     validate_spam_start,
 )
-from group_dialogs import list_broadcast_channels, list_group_chats
+from group_dialogs import group_chat_title, list_broadcast_channels, list_group_chats
 from telethon_join import resolve_tme_post_for_forward
 from telethon_accounts import (
     connect_client_with_fallback,
@@ -101,10 +101,29 @@ def _compute_health(
     enabled_chats: int,
 ) -> dict[str, Any]:
     snap = health.snapshot(aid) or {}
-    last_err_at = snap.get("lastErrorAt") or 0
-    last_err = snap.get("lastError") or ""
-    last_err_kind = snap.get("lastErrorKind") or ""
-    fresh_error = last_err and (_time.time() - last_err_at) < 600
+    now = _time.time()
+    snap_err_at = float(snap.get("lastErrorAt") or 0)
+    snap_err = str(snap.get("lastError") or "")
+    snap_err_kind = str(snap.get("lastErrorKind") or "")
+    persisted_err_at = float(getattr(acc, "last_error_at", 0) or 0)
+    persisted_err = str(getattr(acc, "last_error", "") or "")
+    persisted_err_kind = str(getattr(acc, "last_error_kind", "") or "")
+
+    if snap_err and snap_err_at >= persisted_err_at:
+        last_err_at = snap_err_at
+        last_err = snap_err
+        last_err_kind = snap_err_kind
+    else:
+        last_err_at = persisted_err_at
+        last_err = persisted_err
+        last_err_kind = persisted_err_kind
+
+    errors_total = max(
+        int(getattr(acc, "errors_total", 0) or 0),
+        int(snap.get("errorsTotal") or 0),
+    )
+    # Show last error for 24h (not only 10 min) so dashboard stays informative after restarts.
+    show_last_error = bool(last_err) and (now - last_err_at) < 86400
 
     if client is None:
         code, label, tone = "no_client", "не подключён", "error"
@@ -129,9 +148,9 @@ def _compute_health(
         "lastSendAt": snap.get("lastSendAt") or 0,
         "sendsTotal": snap.get("sendsTotal") or 0,
         "lastErrorAt": last_err_at,
-        "lastError": last_err if fresh_error else "",
-        "lastErrorKind": last_err_kind if fresh_error else "",
-        "errorsTotal": snap.get("errorsTotal") or 0,
+        "lastError": last_err if show_last_error else "",
+        "lastErrorKind": last_err_kind if show_last_error else "",
+        "errorsTotal": errors_total,
     }
 
 
@@ -160,7 +179,22 @@ class BotService:
         self._dialogs_cache: dict[str, tuple[float, list[tuple[int, str]]]] = {}
         self._dialogs_locks: dict[str, asyncio.Lock] = {}
 
-    _DIALOGS_CACHE_TTL_SEC = 120.0
+    _DIALOGS_CACHE_TTL_SEC = 600.0
+    _DIALOGS_STALE_SEC = 1800.0
+
+    async def _refresh_dialogs_cache(
+        self, slot_id: str, client: TelegramClient
+    ) -> None:
+        lock = self._dialogs_locks.setdefault(slot_id, asyncio.Lock())
+        async with lock:
+            try:
+                rows = await list_group_chats(client)
+            except Exception:
+                logger.warning(
+                    "dialogs background refresh failed for %s", slot_id, exc_info=True
+                )
+                return
+            self._dialogs_cache[slot_id] = (_time.monotonic(), rows)
 
     async def _get_group_chats_cached(
         self, slot_id: str, client: TelegramClient, *, force: bool = False
@@ -169,12 +203,17 @@ class BotService:
         async with lock:
             now = _time.monotonic()
             cached = self._dialogs_cache.get(slot_id)
-            if (
-                not force
-                and cached is not None
-                and now - float(cached[0]) < self._DIALOGS_CACHE_TTL_SEC
-            ):
-                return cached[1]
+            if force:
+                rows = await list_group_chats(client)
+                self._dialogs_cache[slot_id] = (now, rows)
+                return rows
+            if cached is not None:
+                age = now - float(cached[0])
+                if age < self._DIALOGS_CACHE_TTL_SEC:
+                    return cached[1]
+                if age < self._DIALOGS_STALE_SEC:
+                    asyncio.create_task(self._refresh_dialogs_cache(slot_id, client))
+                    return cached[1]
             rows = await list_group_chats(client)
             self._dialogs_cache[slot_id] = (now, rows)
             return rows
@@ -256,7 +295,7 @@ class BotService:
         for acc, aid in zip(accounts, order):
             client = self.clients.get(aid)
             connected = bool(client and client.is_connected())
-            acc["authorized"] = connected
+            acc["authorized"] = await _telethon_ready(client)
             acc["health"] = _compute_health(
                 aid,
                 self.multi.accounts[aid],
@@ -303,10 +342,20 @@ class BotService:
             authorized=summary["authorized"],
             enabled_chats=summary["chats"]["enabled"],
         )
+        title_map: dict[str, str] = {}
+        cached_dialogs = self._dialogs_cache.get(aid)
+        if cached_dialogs:
+            for dlg_id, dlg_title in cached_dialogs[1]:
+                t = (dlg_title or "").strip()
+                if t and t != str(dlg_id):
+                    title_map[str(dlg_id)] = t
+
         chat_list: list[dict[str, Any]] = []
         for cid_raw, c in (acc.chat_configs or {}).items():
+            cid_s = str(cid_raw)
             chat_list.append({
-                "chatId": str(cid_raw),
+                "chatId": cid_s,
+                "title": title_map.get(cid_s),
                 "enabled": bool(c.get("enabled")),
                 "customMessage": c.get("custom_message"),
                 "textVariants": list(c.get("text_variants") or []),
@@ -379,8 +428,15 @@ class BotService:
             except ValueError:
                 continue
             cfg = ChatSpamConfig.from_dict(raw)
+            display_title = sid
+            try:
+                resolved = await group_chat_title(client, cid)
+                if resolved:
+                    display_title = resolved
+            except Exception:
+                logger.debug("group_chat_title orphan %s", cid, exc_info=True)
             out.append(
-                self._chat_entry_from_cfg(cid, sid, cfg, configured=True)
+                self._chat_entry_from_cfg(cid, display_title, cfg, configured=True)
             )
 
         out.sort(key=lambda c: (not c["enabled"], (c.get("title") or c["chatId"]).casefold()))
@@ -548,7 +604,7 @@ class BotService:
             if not ok:
                 raise ServiceError(err)
             state.spam_running = True
-            self._ensure_spam_loop(slot_id, client)
+            self._restart_spam_loop(slot_id, client)
         else:
             state.spam_running = False
         self._save()
@@ -630,10 +686,21 @@ class BotService:
         state = self._require_account(slot_id)
         cid = _coerce_int(chat_id_raw, "chatId")
         cfg = state.cfg(cid)
-        if self._apply_chat_patch(cfg, patch):
-            _bump_interval_seq(state)
+        try:
+            if self._apply_chat_patch(cfg, patch):
+                _bump_interval_seq(state)
+        except ServiceError:
+            raise
+        except Exception as e:
+            raise ServiceError(f"Не удалось обновить чат {cid}: {e}") from e
         state.set_cfg(cid, cfg)
         self._save()
+        if state.spam_running:
+            try:
+                client = await self._ensure_client(slot_id)
+                self._ensure_spam_loop(slot_id, client)
+            except Exception as e:
+                logger.warning("upsert_chat[%s]: spam loop: %s", slot_id, e)
         return {"ok": True, "chatId": str(cid), "config": cfg.to_dict()}
 
     async def bulk_set_chats_enabled(
@@ -703,7 +770,7 @@ class BotService:
         """Auth must go through the slot proxy — never fall back to bare VDS IP."""
         state = self._require_account(slot_id)
         proxy_raw = (state.proxy or "").strip()
-        require_proxy = os.getenv("TELEGRAM_AUTH_REQUIRE_PROXY", "1").strip().lower() not in (
+        require_proxy = os.getenv("TELEGRAM_AUTH_REQUIRE_PROXY", "0").strip().lower() not in (
             "0",
             "false",
             "no",
@@ -736,14 +803,16 @@ class BotService:
                 api_id=self.api_id,
                 api_hash=self.api_hash,
                 proxy_raw=proxy_raw or None,
-                allow_direct_fallback=False,
+                allow_direct_fallback=not proxy_raw,
                 profile=self.api_config,
             )
         except Exception as e:
-            raise ServiceError(
-                f"Не удалось подключиться через прокси: {e}. "
-                "Проверь прокси (кнопка «Проверить») — без рабочего прокси код с VDS не придёт."
-            ) from e
+            hint = (
+                "Проверь прокси (кнопка «Проверить»)."
+                if proxy_raw
+                else "Проверь доступ VDS к Telegram или укажи прокси."
+            )
+            raise ServiceError(f"Не удалось подключиться: {e}. {hint}") from e
         self.clients[slot_id] = client
         return client
 
@@ -790,6 +859,8 @@ class BotService:
                     profile=self.api_config,
                 )
                 self.clients[slot_id] = client
+                if state.spam_running:
+                    self._restart_spam_loop(slot_id, client)
         return client
 
     def _ensure_spam_loop(self, slot_id: str, client: TelegramClient) -> None:
@@ -798,12 +869,18 @@ class BotService:
             client, state, persist=self._save, account_key=slot_id
         )
 
+    def _restart_spam_loop(self, slot_id: str, client: TelegramClient) -> None:
+        state = self._require_account(slot_id)
+        restart_spam_loop_background(
+            client, state, persist=self._save, account_key=slot_id
+        )
+
     async def auth_send_code(self, slot_id: str, phone: str) -> dict[str, Any]:
         self._require_account(slot_id)
         phone = (phone or "").strip()
         if not phone:
             raise ServiceError("phone обязателен")
-        client = await self._ensure_client(slot_id)
+        client = await self._ensure_client_for_auth(slot_id)
         try:
             sent = await request_login_code(client, phone)
         except Exception as e:
@@ -864,6 +941,12 @@ class BotService:
         client: TelegramClient,
     ) -> dict[str, Any]:
         self._pending_auth.pop(slot_id, None)
+        self.clients[slot_id] = client
+        if not client.is_connected():
+            try:
+                await client.connect()
+            except Exception as e:
+                raise ServiceError(f"connect после входа: {e}") from e
         me = await client.get_me()
         self._ensure_spam_loop(slot_id, client)
         self._save()
