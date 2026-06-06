@@ -35,9 +35,10 @@
       });
 
       if (r.ok) {
+        const data = await r.json().catch(() => ({}));
         const target = presetPlan
           ? `/profile?plan=${encodeURIComponent(presetPlan)}`
-          : "/profile";
+          : (data.redirect || "/app");
         window.location.replace(target);
         return;
       }

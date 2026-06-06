@@ -7,9 +7,11 @@ from telethon import TelegramClient
 
 from bot_api import serve_bot_api
 from bot_service import BotService
+from inviter.service import InviterService
 from spam_scheduler import start_spam_loop_background
 from state import load_multi_account_state, save_multi_account_state
 from telethon_accounts import connect_client_with_fallback, make_telethon_client
+from telethon_client_profile import get_telegram_api_config
 
 load_dotenv()
 
@@ -19,8 +21,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
+API_CONFIG = get_telegram_api_config()
+API_ID = API_CONFIG.api_id
+API_HASH = API_CONFIG.api_hash
+logger.info(
+    "Telegram API: profile=%s api_id=%s device=%s",
+    API_CONFIG.profile,
+    API_ID,
+    API_CONFIG.device_model,
+)
 
 
 async def run_control_bot_polling(app) -> None:
@@ -89,10 +98,12 @@ async def main() -> None:
             API_ID,
             API_HASH,
             proxy_raw=multi.accounts[aid].proxy,
+            profile=API_CONFIG,
         )
 
     authorized_at_boot: set[str] = set()
     for aid, client in telethon_clients.items():
+        connected = False
         try:
             client = await connect_client_with_fallback(
                 client,
@@ -101,8 +112,10 @@ async def main() -> None:
                 api_hash=API_HASH,
                 proxy_raw=multi.accounts[aid].proxy,
                 allow_direct_fallback=True,
+                profile=API_CONFIG,
             )
             telethon_clients[aid] = client
+            connected = True
         except Exception as e:
             logger.warning(
                 "Userbot [%s]: не удалось подключиться (%s). "
@@ -110,18 +123,18 @@ async def main() -> None:
                 aid,
                 e,
             )
-            continue
-        if await client.is_user_authorized():
-            authorized_at_boot.add(aid)
-            me = await client.get_me()
-            logger.info("Userbot [%s] запущен @%s (%s)", aid, me.username or "-", me.id)
-        else:
-            logger.warning(
-                "Userbot [%s]: нет авторизации — в боте: Аккаунты → нажмите этот слот.",
-                aid,
-            )
+        if connected:
+            if await client.is_user_authorized():
+                authorized_at_boot.add(aid)
+                me = await client.get_me()
+                logger.info("Userbot [%s] запущен @%s (%s)", aid, me.username or "-", me.id)
+            else:
+                logger.warning(
+                    "Userbot [%s]: нет авторизации — в боте: Аккаунты → нажмите этот слот.",
+                    aid,
+                )
         start_spam_loop_background(
-            client,
+            telethon_clients[aid],
             multi.accounts[aid],
             persist=lambda: save_multi_account_state(multi),
             account_key=aid,
@@ -159,9 +172,13 @@ async def main() -> None:
             telethon_clients,
             api_id=API_ID,
             api_hash=API_HASH,
+            api_config=API_CONFIG,
             save=lambda: save_multi_account_state(multi),
         )
-        background_tasks.append(asyncio.create_task(serve_bot_api(bot_service)))
+        inviter_service = InviterService(bot_service)
+        background_tasks.append(
+            asyncio.create_task(serve_bot_api(bot_service, inviter_service))
+        )
 
     if token:
         if not admins_raw:

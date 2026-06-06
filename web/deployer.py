@@ -10,6 +10,7 @@ Flow:
 5. python -m venv + pip install -r bot/requirements.txt.
 6. Generate BOT_API_TOKEN (stored in registry), write .env on remote.
 7. Install/enable/restart `userbot.service`.
+8. Enable systemd timer — restart userbot every USERBOT_RESTART_HOURS (default 24).
 
 Subsequent operations (restart/stop/uninstall) use the deploy key.
 """
@@ -24,7 +25,7 @@ import secrets
 import tarfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import asyncssh
 
@@ -37,6 +38,19 @@ REPO_ROOT = WEB_DIR.parent
 BOT_DIR = REPO_ROOT / "bot"
 DEPLOY_KEY = WEB_DIR / "deploy_key"
 DEPLOY_KEY_PUB = WEB_DIR / "deploy_key.pub"
+
+USERBOT_RESTART_HOURS = max(0, int(os.getenv("USERBOT_RESTART_HOURS", "24") or 24))
+
+
+def _restart_hours_for(rec: BotRecord) -> int:
+    """Per-server auto-restart interval (0 = disabled)."""
+    try:
+        h = int(rec.restart_interval_hours)
+    except (TypeError, ValueError):
+        h = USERBOT_RESTART_HOURS
+    if h <= 0:
+        return 0
+    return min(h, 168)
 
 EXCLUDE_NAMES = {
     "sessions",
@@ -188,6 +202,93 @@ def _systemd_unit(install_dir: str, run_as: str) -> str:
     )
 
 
+def _systemd_restart_service() -> str:
+    return (
+        "[Unit]\n"
+        "Description=Scheduled userbot restart\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/bin/systemctl restart userbot\n"
+    )
+
+
+def _systemd_restart_timer(interval: str) -> str:
+    return (
+        "[Unit]\n"
+        "Description=Periodic userbot restart\n"
+        "\n"
+        "[Timer]\n"
+        f"OnBootSec={interval}\n"
+        f"OnUnitActiveSec={interval}\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+async def _install_userbot_restart_timer(
+    conn: asyncssh.SSHClientConnection,
+    st: DeployState,
+    *,
+    sudo: bool,
+    sudo_password: str,
+    hours: int = USERBOT_RESTART_HOURS,
+) -> None:
+    """Install or remove systemd timer that restarts userbot every N hours."""
+    if hours <= 0:
+        await _run(
+            conn,
+            "systemctl disable --now userbot-restart.timer 2>/dev/null || true",
+            st,
+            sudo=sudo,
+            sudo_password=sudo_password,
+            check=False,
+        )
+        await _run(
+            conn,
+            "rm -f /etc/systemd/system/userbot-restart.service "
+            "/etc/systemd/system/userbot-restart.timer",
+            st,
+            sudo=sudo,
+            sudo_password=sudo_password,
+            check=False,
+        )
+        await _run(conn, "systemctl daemon-reload", st, sudo=sudo, sudo_password=sudo_password)
+        return
+
+    interval = f"{hours}h"
+    st.add(f"Таймер перезапуска userbot каждые {hours} ч…")
+    async with conn.start_sftp_client() as sftp:
+        async with sftp.open("/tmp/userbot-restart.service", "w") as f:
+            await f.write(_systemd_restart_service())
+        async with sftp.open("/tmp/userbot-restart.timer", "w") as f:
+            await f.write(_systemd_restart_timer(interval))
+    await _run(
+        conn,
+        "mv /tmp/userbot-restart.service /etc/systemd/system/userbot-restart.service",
+        st,
+        sudo=sudo,
+        sudo_password=sudo_password,
+    )
+    await _run(
+        conn,
+        "mv /tmp/userbot-restart.timer /etc/systemd/system/userbot-restart.timer",
+        st,
+        sudo=sudo,
+        sudo_password=sudo_password,
+    )
+    await _run(conn, "systemctl daemon-reload", st, sudo=sudo, sudo_password=sudo_password)
+    await _run(
+        conn,
+        "systemctl enable --now userbot-restart.timer",
+        st,
+        sudo=sudo,
+        sudo_password=sudo_password,
+    )
+
+
 # -------------------------------------------------------------- ssh
 async def _connect(
     rec: BotRecord, password: Optional[str]
@@ -252,21 +353,78 @@ async def _run(
 
 def _normalize_bot_env(env: dict[str, str], api_token: str, api_port: int) -> dict[str, str]:
     """Map deploy form keys → bot .env keys."""
-    merged = {
-        "API_ID": str(env.get("API_ID", "")).strip(),
-        "API_HASH": str(env.get("API_HASH", "")).strip(),
-        "BOT_TOKEN": str(env.get("BOT_TOKEN") or env.get("TG_BOT_TOKEN", "")).strip(),
-        "ADMIN_USER_IDS": str(env.get("ADMIN_USER_IDS", "")).strip(),
-        "BOT_API_TOKEN": api_token,
-        "BOT_API_HOST": "0.0.0.0",
-        "BOT_API_PORT": str(api_port),
-        "BOT_API_ENABLED": "1",
-        # Empty ACCOUNTS list — bot starts without auto-creating "default" slot.
-        "ACCOUNTS": "",
-    }
-    out = {k: v for k, v in merged.items() if v}
+    api_id = str(env.get("API_ID", "")).strip()
+    api_hash = str(env.get("API_HASH", "")).strip()
+    profile = str(
+        env.get("TELEGRAM_CLIENT_PROFILE")
+        or env.get("telegramClientProfile")
+        or ""
+    ).strip().lower()
+    device_profile = str(
+        env.get("TELEGRAM_DEVICE_PROFILE")
+        or env.get("telegramDeviceProfile")
+        or "tdesktop"
+    ).strip().lower()
+    if device_profile not in ("tdesktop", "android"):
+        device_profile = "tdesktop"
+
+    # Existing sessions: keep API_ID/API_HASH, only refresh device fingerprint.
+    if api_id and api_hash:
+        profile = "custom"
+        merged: dict[str, str] = {
+            "TELEGRAM_CLIENT_PROFILE": "custom",
+            "TELEGRAM_DEVICE_PROFILE": device_profile,
+            "API_ID": api_id,
+            "API_HASH": api_hash,
+            "BOT_TOKEN": str(env.get("BOT_TOKEN") or env.get("TG_BOT_TOKEN", "")).strip(),
+            "ADMIN_USER_IDS": str(env.get("ADMIN_USER_IDS", "")).strip(),
+            "BOT_API_TOKEN": api_token,
+            "BOT_API_HOST": "0.0.0.0",
+            "BOT_API_PORT": str(api_port),
+            "BOT_API_ENABLED": "1",
+            "ACCOUNTS": "",
+        }
+    else:
+        if profile not in ("tdesktop", "android", "custom"):
+            profile = "tdesktop"
+        merged = {
+            "TELEGRAM_CLIENT_PROFILE": profile,
+            "BOT_TOKEN": str(env.get("BOT_TOKEN") or env.get("TG_BOT_TOKEN", "")).strip(),
+            "ADMIN_USER_IDS": str(env.get("ADMIN_USER_IDS", "")).strip(),
+            "BOT_API_TOKEN": api_token,
+            "BOT_API_HOST": "0.0.0.0",
+            "BOT_API_PORT": str(api_port),
+            "BOT_API_ENABLED": "1",
+            "ACCOUNTS": "",
+        }
+        if profile == "custom":
+            merged["API_ID"] = api_id
+            merged["API_HASH"] = api_hash
+
+    out = {k: v for k, v in merged.items() if v != ""}
     out["ACCOUNTS"] = ""
+    out["BOT_API_ENABLED"] = "1"
+    out["TELEGRAM_CLIENT_PROFILE"] = out.get("TELEGRAM_CLIENT_PROFILE", profile or "tdesktop")
     return out
+
+
+def _merge_remote_env(env: dict[str, str], remote: dict[str, str]) -> dict[str, str]:
+    """Fill missing deploy fields from existing VDS .env (preserve sessions)."""
+    merged = dict(env)
+    for key in (
+        "API_ID",
+        "API_HASH",
+        "TELEGRAM_CLIENT_PROFILE",
+        "TELEGRAM_DEVICE_PROFILE",
+        "ADMIN_USER_IDS",
+    ):
+        if not str(merged.get(key, "")).strip() and remote.get(key):
+            merged[key] = remote[key]
+    if not str(merged.get("TG_BOT_TOKEN", "")).strip():
+        merged["TG_BOT_TOKEN"] = remote.get("BOT_TOKEN", remote.get("TG_BOT_TOKEN", ""))
+    if not str(merged.get("BOT_TOKEN", "")).strip() and merged.get("TG_BOT_TOKEN"):
+        merged["BOT_TOKEN"] = merged["TG_BOT_TOKEN"]
+    return merged
 
 
 async def _pick_api_port(conn: asyncssh.SSHClientConnection, preferred: int) -> int:
@@ -339,7 +497,15 @@ async def deploy(
             token = rec.api_token or secrets.token_urlsafe(32)
             registry.update(bid, api_token=token)
 
-            full_env = _normalize_bot_env(env, token, rec.api_port)
+            deploy_env = dict(env)
+            if rec.has_ssh_key and rec.status != "new":
+                try:
+                    remote = await read_remote_env(rec, password=password)
+                    deploy_env = _merge_remote_env(deploy_env, remote)
+                except Exception:
+                    pass
+
+            full_env = _normalize_bot_env(deploy_env, token, rec.api_port)
 
             st.add(f"Подключаюсь к {rec.ssh_user}@{rec.host}:{rec.ssh_port}…")
             async with await _connect(rec, password) as conn:
@@ -442,6 +608,14 @@ async def deploy(
                 await sh("systemctl enable userbot", sudo=True)
                 await sh("systemctl restart userbot", sudo=True)
 
+                await _install_userbot_restart_timer(
+                    conn,
+                    st,
+                    sudo=sudo_needed,
+                    sudo_password=sudo_password,
+                    hours=_restart_hours_for(rec),
+                )
+
                 # 9) smoke + API health
                 st.add("Проверяю API бота…")
                 await _wait_bot_health(conn, api_port)
@@ -481,6 +655,12 @@ async def _simple_op(
     password: Optional[str],
     cmds: list[str],
     on_success_status: Optional[str] = None,
+    after_cmds: Optional[
+        Callable[
+            [asyncssh.SSHClientConnection, DeployState, bool, str],
+            Awaitable[None],
+        ]
+    ] = None,
 ) -> None:
     rec = registry.get(bid)
     if rec is None:
@@ -500,6 +680,8 @@ async def _simple_op(
                 sudo_pw = "" if is_root else (password or "")
                 for cmd in cmds:
                     await _run(conn, cmd, st, sudo=not is_root, sudo_password=sudo_pw, check=False)
+                if after_cmds is not None:
+                    await after_cmds(conn, st, not is_root, sudo_pw)
             st.status = "success"
             if on_success_status:
                 registry.update(bid, status=on_success_status, last_error="")
@@ -536,9 +718,53 @@ async def read_remote_env(
 
 
 async def restart_remote(bid: str, registry: BotRegistry, *, password: Optional[str] = None) -> None:
+    rec = registry.get(bid)
+    if rec is None:
+        raise RuntimeError(f"Бот {bid} не найден")
+    hours = _restart_hours_for(rec)
+
+    async def _ensure_timer(
+        conn: asyncssh.SSHClientConnection,
+        st: DeployState,
+        sudo: bool,
+        sudo_password: str,
+    ) -> None:
+        await _install_userbot_restart_timer(
+            conn, st, sudo=sudo, sudo_password=sudo_password, hours=hours
+        )
+
     await _simple_op(
         bid, registry, op_name="restart", password=password,
         cmds=["systemctl restart userbot"], on_success_status="running",
+        after_cmds=_ensure_timer,
+    )
+
+
+async def sync_restart_timer_remote(
+    bid: str, registry: BotRegistry, *, password: Optional[str] = None
+) -> None:
+    rec = registry.get(bid)
+    if rec is None:
+        raise RuntimeError(f"Бот {bid} не найден")
+    hours = _restart_hours_for(rec)
+
+    async def _only_timer(
+        conn: asyncssh.SSHClientConnection,
+        st: DeployState,
+        sudo: bool,
+        sudo_password: str,
+    ) -> None:
+        await _install_userbot_restart_timer(
+            conn, st, sudo=sudo, sudo_password=sudo_password, hours=hours
+        )
+
+    await _simple_op(
+        bid,
+        registry,
+        op_name="sync_timer",
+        password=password,
+        cmds=[],
+        after_cmds=_only_timer,
     )
 
 
@@ -560,7 +786,10 @@ async def uninstall_remote(
         cmds=[
             "systemctl stop userbot 2>/dev/null || true",
             "systemctl disable userbot 2>/dev/null || true",
+            "systemctl disable --now userbot-restart.timer 2>/dev/null || true",
             "rm -f /etc/systemd/system/userbot.service",
+            "rm -f /etc/systemd/system/userbot-restart.service",
+            "rm -f /etc/systemd/system/userbot-restart.timer",
             "systemctl daemon-reload",
             f"rm -rf {_sh_quote(rec.install_dir)}",
         ],

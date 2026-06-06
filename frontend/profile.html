@@ -9,7 +9,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/profile.css" />
+  <link rel="stylesheet" href="css/profile.css?v=20260528chk2" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
 </head>
 <body class="pf-body">
 
@@ -22,13 +23,26 @@
     <nav class="pf-topnav">
       <a href="/app" id="pfDashLink">Дашборд</a>
       <a href="/profile" class="active">Профиль</a>
+      <a href="/changelog">Changelog</a>
     </nav>
+    <button type="button" class="icon-btn pf-menu-btn" id="pfMenuBtn" aria-label="Меню" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M4 7h16M4 12h16M4 17h16"/>
+      </svg>
+    </button>
     <div class="pf-top-actions">
       <span class="pf-user" id="pfUserEmail">—</span>
       <button class="btn-ghost" id="pfLogoutBtn">Выйти</button>
     </div>
   </div>
 </header>
+
+<div class="pf-mobile-backdrop" id="pfMobileBackdrop" hidden aria-hidden="true"></div>
+<nav class="pf-mobile-nav" id="pfMobileNav" aria-label="Навигация">
+  <a href="/app" id="pfMobileDash">Дашборд</a>
+  <a href="/profile" class="active">Профиль</a>
+  <a href="/changelog">Changelog</a>
+</nav>
 
 <main class="pf-main">
   <div class="pf-container">
@@ -48,11 +62,30 @@
     <section class="pf-notify-list" id="pfNotifications" hidden></section>
 
     <section class="pf-section pf-referral" id="pfReferralSection" hidden>
-      <h2 class="pf-h2">Реферальная программа</h2>
-      <p class="pf-sub">Пригласи друга — после его первой оплаты ты получишь бонусные дни.</p>
-      <div class="pf-ref-row">
-        <code id="pfRefCode">—</code>
-        <button type="button" class="btn-ghost" id="pfRefCopy">Копировать ссылку</button>
+      <div class="pf-ref-card">
+        <div class="pf-ref-head">
+          <div class="pf-ref-head-text">
+            <span class="pf-ref-badge" id="pfRefBadge">15% с оплат</span>
+            <h2 class="pf-h2 pf-ref-title">Реферальная программа</h2>
+            <p class="pf-sub pf-ref-desc" id="pfRefDesc">Приглашай друзей — получай процент с каждой их оплаты.</p>
+          </div>
+        </div>
+        <div class="pf-ref-perks" id="pfRefPerks" aria-hidden="true"></div>
+        <div class="pf-ref-stats" id="pfRefStats"></div>
+        <div class="pf-ref-link-block">
+          <span class="pf-ref-link-label">Твоя реферальная ссылка</span>
+          <div class="pf-ref-link-row">
+            <input class="pf-ref-link-input" id="pfRefCode" type="text" readonly aria-label="Реферальная ссылка" />
+            <button type="button" class="btn-primary pf-ref-copy" id="pfRefCopy">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>Копировать</span>
+            </button>
+          </div>
+        </div>
+        <div class="pf-ref-history" id="pfRefHistory" hidden>
+          <h3 class="pf-h3">Последние начисления</h3>
+          <div class="pf-ref-history-list" id="pfRefHistoryList"></div>
+        </div>
       </div>
     </section>
 
@@ -64,6 +97,15 @@
         <button type="button" class="btn-ghost" id="pfPromoApply">Применить</button>
       </div>
       <p class="pf-promo-hint" id="pfPromoHint" hidden></p>
+      <label class="pf-ref-balance" id="pfUseRefBalanceWrap" hidden>
+        <input type="checkbox" id="pfUseRefBalance" class="pf-ref-balance-input" />
+        <span class="pf-ref-balance-box" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12l4 4L19 6"/>
+          </svg>
+        </span>
+        <span class="pf-ref-balance-text" id="pfUseRefBalanceLabel">Списать реферальный баланс</span>
+      </label>
 
       <div class="pf-plans" id="pfPlans"></div>
     </section>
@@ -95,6 +137,7 @@
 </div>
 
   <script src="js/http.js"></script>
+  <script src="js/pf-nav.js"></script>
   <script src="js/profile.js"></script>
 </body>
 </html>

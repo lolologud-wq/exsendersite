@@ -1,5 +1,6 @@
 (function () {
   const PLANS_META = {
+    trial: { label: "Trial", days: 1 },
     week: { label: "Week", days: 7 },
     month: { label: "Month", days: 30 },
     quarter: { label: "Quarter", days: 90 },
@@ -8,6 +9,8 @@
   let pollTimer = null;
   let activeInvoiceId = null;
   let activePromoCode = "";
+  let useReferralBalance = true;
+  let lastReferralBalance = 0;
 
   function fmtUsd(n) {
     return `$${Number(n).toFixed(Number(n) % 1 ? 2 : 0)}`;
@@ -70,16 +73,33 @@
     const active = profile?.planActive;
     const plan = profile?.plan;
     const exp = profile?.planExpiresAt;
+    const isTrial = profile?.isTrial;
 
     if (nameEl) {
-      nameEl.textContent = active
-        ? `${planLabel(plan)} · активен`
-        : "Нет активной подписки";
+      if (isTrial) {
+        nameEl.textContent = "Пробный период · активен";
+      } else {
+        nameEl.textContent = active
+          ? `${planLabel(plan)} · активен`
+          : "Нет активной подписки";
+      }
     }
     if (metaEl) {
-      metaEl.textContent = active
-        ? `Действует до ${fmtDate(exp)}`
-        : "Выбери тариф ниже и оплати через Crypto Bot — доступ откроется автоматически.";
+      if (isTrial && active) {
+        const sec = profile.planRemainingSec || 0;
+        const lim = profile.trialLimits;
+        const limTxt = lim ? ` · лимит ${lim.maxBots} сервер, ${lim.maxAccounts} аккаунта` : "";
+        if (sec > 0 && sec < 86400) {
+          const h = Math.max(1, Math.ceil(sec / 3600));
+          metaEl.textContent = `Осталось ~${h} ч.${limTxt}`;
+        } else {
+          metaEl.textContent = `Действует до ${fmtDate(exp)}${limTxt}`;
+        }
+      } else {
+        metaEl.textContent = active
+          ? `Действует до ${fmtDate(exp)}`
+          : "Выбери тариф ниже и оплати через Crypto Bot — доступ откроется автоматически.";
+      }
     }
     if (dashLink) dashLink.hidden = false;
     if (openApp) {
@@ -144,23 +164,36 @@
       host.innerHTML = '<div class="pf-empty">Платежей пока нет.</div>';
       return;
     }
-    host.innerHTML = items.map((h) => `
+    host.innerHTML = items.map((h) => {
+      const credit = h.referralCreditUsd || 0;
+      const amt = credit > 0 && !h.amountUsd
+        ? `реф. баланс ${fmtUsd(credit)}`
+        : credit > 0
+          ? `${fmtUsd(h.amountUsd)} (−${fmtUsd(credit)})`
+          : fmtUsd(h.amountUsd);
+      return `
       <div class="pf-history-row">
         <div>
           <div class="pf-history-plan">${escapeHtml(planLabel(h.plan))}</div>
           <div class="pf-history-date">${fmtDate(h.createdAt)}</div>
         </div>
-        <div class="pf-history-amt">${fmtUsd(h.amountUsd)}</div>
+        <div class="pf-history-amt">${amt}</div>
         <span class="pf-pill pf-pill-${h.status === "paid" ? "ok" : "wait"}">${escapeHtml(h.status)}</span>
-      </div>
-    `).join("");
+      </div>`;
+    }).join("");
   }
 
   function openPayModal(data) {
     const modal = document.getElementById("pfPayModal");
     document.getElementById("pfPayTitle").textContent = `Оплата · ${planLabel(data.plan)}`;
     document.getElementById("pfPayPlan").textContent = planLabel(data.plan);
-    document.getElementById("pfPayAmount").textContent = fmtUsd(data.amountUsd);
+    const credit = data.referralCreditUsd || 0;
+    const amtEl = document.getElementById("pfPayAmount");
+    if (amtEl) {
+      amtEl.textContent = credit > 0
+        ? `${fmtUsd(data.amountUsd)} (списано ${fmtUsd(credit)} с баланса)`
+        : fmtUsd(data.amountUsd);
+    }
     document.getElementById("pfPayStatus").textContent = "ожидание оплаты";
     document.getElementById("pfPayStatus").className = "pf-pill pf-pill-wait";
     const link = document.getElementById("pfPayLink");
@@ -202,12 +235,27 @@
     try {
       const body = { plan: planId };
       if (activePromoCode) body.promo = activePromoCode;
+      if (useReferralBalance && lastReferralBalance >= 0.01) {
+        body.useReferralBalance = true;
+      }
       const res = await api("POST", "/api/payments/create-invoice", body);
+      if (res.paid || res.paidByReferral) {
+        showAlert(
+          res.referralCreditUsd
+            ? `Подписка оплачена реферальным балансом (${fmtUsd(res.referralCreditUsd)})`
+            : "Подписка активирована!",
+          "ok",
+        );
+        await loadProfile();
+        setTimeout(() => { window.location.href = "/app"; }, 1200);
+        return;
+      }
       activeInvoiceId = res.invoiceId;
       openPayModal({
         plan: planId,
         amountUsd: res.amountUsd,
         payUrl: res.payUrl,
+        referralCreditUsd: res.referralCreditUsd,
       });
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(() => pollInvoice(activeInvoiceId), 4000);
@@ -217,19 +265,139 @@
     }
   }
 
-  function renderReferral(profile) {
+  function renderReferral(profile, referral) {
     const sec = document.getElementById("pfReferralSection");
     const codeEl = document.getElementById("pfRefCode");
+    const statsEl = document.getElementById("pfRefStats");
+    const descEl = document.getElementById("pfRefDesc");
+    const badgeEl = document.getElementById("pfRefBadge");
+    const perksEl = document.getElementById("pfRefPerks");
+    const histWrap = document.getElementById("pfRefHistory");
+    const histList = document.getElementById("pfRefHistoryList");
     if (!sec || !profile?.referralCode) return;
     sec.hidden = false;
+
+    const pct = referral?.commissionPct ?? 15;
+    const bonusDays = referral?.bonusDaysFirstPay ?? 3;
+    if (badgeEl) badgeEl.textContent = `${pct}% с каждой оплаты`;
+    if (descEl) {
+      descEl.textContent =
+        "Делись ссылкой — получай процент с оплат друзей. Баланс трать на тариф целиком или частично.";
+    }
+    if (perksEl) {
+      perksEl.innerHTML = [
+        `${pct}% комиссия`,
+        `+${bonusDays} дн. за 1-ю оплату`,
+        "Оплата тарифа балансом",
+      ].map((t) => `<span class="pf-ref-perk">${escapeHtml(t)}</span>`).join("");
+    }
+
+    const invited = referral?.invited ?? 0;
+    const paid = referral?.paid ?? 0;
+    const earned = profile.referralEarnedTotal || 0;
+    const balance = profile.referralBalanceUsd || 0;
+
+    if (statsEl) {
+      statsEl.innerHTML = `
+        <article class="pf-ref-stat">
+          <span class="pf-ref-stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3.2"/><path d="M2.8 20c.6-3.4 3.1-5.4 6.2-5.4S14.6 16.6 15.2 20"/><circle cx="17.5" cy="8.5" r="2.5"/><path d="M16 14.5c2.6.2 4.6 1.7 5.2 4.5"/></svg>
+          </span>
+          <div class="pf-ref-stat-body">
+            <span class="pf-ref-stat-label">Приглашено</span>
+            <b class="pf-ref-stat-value">${invited}</b>
+          </div>
+        </article>
+        <article class="pf-ref-stat">
+          <span class="pf-ref-stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <div class="pf-ref-stat-body">
+            <span class="pf-ref-stat-label">Оплатили</span>
+            <b class="pf-ref-stat-value">${paid}</b>
+          </div>
+        </article>
+        <article class="pf-ref-stat">
+          <span class="pf-ref-stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          </span>
+          <div class="pf-ref-stat-body">
+            <span class="pf-ref-stat-label">Заработано</span>
+            <b class="pf-ref-stat-value">${fmtUsd(earned)}</b>
+          </div>
+        </article>
+        <article class="pf-ref-stat pf-ref-stat-balance">
+          <span class="pf-ref-stat-icon pf-ref-stat-icon-accent" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+          </span>
+          <div class="pf-ref-stat-body">
+            <span class="pf-ref-stat-label">Баланс</span>
+            <b class="pf-ref-stat-value pf-ref-stat-value-accent">${fmtUsd(balance)}</b>
+          </div>
+        </article>`;
+    }
+
+    lastReferralBalance = profile.referralBalanceUsd || 0;
+    const refBalWrap = document.getElementById("pfUseRefBalanceWrap");
+    const refBalLabel = document.getElementById("pfUseRefBalanceLabel");
+    const refBalCheck = document.getElementById("pfUseRefBalance");
+    if (refBalWrap && lastReferralBalance >= 0.01) {
+      refBalWrap.hidden = false;
+      if (refBalLabel) {
+        refBalLabel.innerHTML = `Списать реферальный баланс <b>(${escapeHtml(fmtUsd(lastReferralBalance))}</b> доступно)`;
+      }
+      if (refBalCheck) refBalCheck.checked = useReferralBalance;
+    } else if (refBalWrap) {
+      refBalWrap.hidden = true;
+    }
+
     const link = `${window.location.origin}/register?ref=${profile.referralCode}`;
-    if (codeEl) codeEl.textContent = link;
+    if (codeEl) codeEl.value = link;
+
+    const history = referral?.history || [];
+    if (histWrap && histList) {
+      if (!history.length) {
+        histWrap.hidden = true;
+      } else {
+        histWrap.hidden = false;
+        histList.innerHTML = history.map((h) => {
+          const isBonus = h.kind === "bonus_days";
+          const isAdmin = h.kind === "admin_grant";
+          const label = isBonus
+            ? "Бонус за первую оплату реферала"
+            : isAdmin
+              ? "Начисление от администрации"
+              : "Комиссия с оплаты";
+          const amt = isBonus ? `+${bonusDays} дн.` : fmtUsd(h.commissionUsd);
+          const icon = isBonus ? "🎁" : isAdmin ? "✨" : "💵";
+          return `
+            <div class="pf-ref-hist-row">
+              <span class="pf-ref-hist-icon">${icon}</span>
+              <div class="pf-ref-hist-main">
+                <span class="pf-ref-hist-label">${escapeHtml(label)}</span>
+                <span class="pf-ref-hist-date">${fmtDate(h.createdAt)}</span>
+              </div>
+              <span class="pf-ref-hist-amt">${escapeHtml(amt)}</span>
+            </div>`;
+        }).join("");
+      }
+    }
+
     const copyBtn = document.getElementById("pfRefCopy");
     if (copyBtn && !copyBtn.dataset.bound) {
       copyBtn.dataset.bound = "1";
       copyBtn.addEventListener("click", () => {
-        const url = codeEl?.textContent || "";
-        navigator.clipboard?.writeText(url).then(() => showAlert("Ссылка скопирована", "ok"));
+        const url = codeEl?.value || "";
+        if (!url) return;
+        navigator.clipboard?.writeText(url).then(() => {
+          showAlert("Ссылка скопирована", "ok");
+          const span = copyBtn.querySelector("span");
+          if (span) {
+            const prev = span.textContent;
+            span.textContent = "Скопировано";
+            setTimeout(() => { span.textContent = prev; }, 2000);
+          }
+        });
       });
     }
   }
@@ -276,7 +444,7 @@
     }
     renderHistory(data.history || []);
     if (data.kind !== "admin") {
-      renderReferral(data.profile);
+      renderReferral(data.profile, data.referral);
       renderNotifications(data.notifications || []);
     }
 
@@ -309,6 +477,10 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closePayModal();
+  });
+
+  document.getElementById("pfUseRefBalance")?.addEventListener("change", (e) => {
+    useReferralBalance = !!e.target.checked;
   });
 
   document.getElementById("pfPromoApply")?.addEventListener("click", async () => {

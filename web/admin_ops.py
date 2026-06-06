@@ -295,49 +295,72 @@ class NotificationStore:
         message: str,
         title: str = "exsender",
         user_ids: list[str] | None = None,
+        broadcast_user_ids: list[str] | None = None,
         admin: str = "",
     ) -> int:
-        """Create notifications. user_ids=None or empty → broadcast to all."""
+        """Create notifications. Empty user_ids → fan-out to broadcast_user_ids (not '*')."""
         msg = message.strip()
         if not msg:
             raise ValueError("Сообщение пустое")
         count = 0
         with self._lock:
-            if not user_ids:
+            targets: list[str] = []
+            if user_ids:
+                targets = [str(uid).strip() for uid in user_ids if str(uid).strip()]
+            elif broadcast_user_ids is not None:
+                targets = [str(uid).strip() for uid in broadcast_user_ids if str(uid).strip()]
+            else:
+                raise ValueError("Укажите получателей")
+
+            for uid in targets:
                 self._items.append(
                     NotificationRecord(
                         id=secrets.token_urlsafe(8),
-                        user_id="*",
+                        user_id=uid,
                         title=title[:120],
                         message=msg[:2000],
                         created_by=admin,
                     )
                 )
-                count = 1
-            else:
-                for uid in user_ids:
-                    uid = str(uid).strip()
-                    if not uid:
-                        continue
-                    self._items.append(
-                        NotificationRecord(
-                            id=secrets.token_urlsafe(8),
-                            user_id=uid,
-                            title=title[:120],
-                            message=msg[:2000],
-                            created_by=admin,
-                        )
-                    )
-                    count += 1
+                count += 1
             if len(self._items) > 1000:
                 self._items = self._items[-1000:]
             self._save_locked()
         return count
 
-    def for_user(self, user_id: str, *, include_read: bool = False) -> list[dict[str, Any]]:
+    def clear_all(self) -> int:
+        with self._lock:
+            count = len(self._items)
+            self._items = []
+            self._save_locked()
+        return count
+
+    def remove_for_user(self, user_id: str) -> int:
+        uid = str(user_id or "").strip()
+        if not uid:
+            return 0
+        with self._lock:
+            before = len(self._items)
+            self._items = [n for n in self._items if n.user_id != uid]
+            removed = before - len(self._items)
+            if removed:
+                self._save_locked()
+            return removed
+
+    def for_user(
+        self,
+        user_id: str,
+        *,
+        user_created_at: float = 0.0,
+        include_read: bool = False,
+    ) -> list[dict[str, Any]]:
         now_items = []
         for n in self._items:
-            if n.user_id != "*" and n.user_id != user_id:
+            if n.user_id == "*":
+                # Legacy broadcast: only users who existed when it was sent.
+                if user_created_at > 0 and user_created_at > n.created_at + 1:
+                    continue
+            elif n.user_id != user_id:
                 continue
             read = user_id in n.read_by
             if read and not include_read:

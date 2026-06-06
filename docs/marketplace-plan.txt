@@ -1,0 +1,519 @@
+exsender Marketplace — план торговой площадки
+=============================================
+Версия: черновик v0.1 · 2026-05-28
+Статус: только план, в продукт не внедряется
+
+Цель
+----
+Отдельный (или встроенный позже) маркетплейс, где продавцы выставляют ресурсы для
+Telegram-рассылок, а покупатели получают их «под ключ» или импортом в exsender:
+  • VDS / серверы под userbot
+  • Telegram-аккаунты (.session, готовые слоты)
+  • Списки чатов (готовые базы, ниши, GEO)
+  • Сопутствующее: прокси, «прогретые» связки, услуги настройки
+
+Площадка монетизирует комиссию, повышает retention exsender и закрывает боль
+«где взять аккаунты/чаты/сервер» без ухода к конкурентам.
+
+
+═══════════════════════════════════════════════════════════════
+1. ПОЗИЦИОНИРОВАНИЕ
+═══════════════════════════════════════════════════════════════
+
+Рабочее название: exsender Market / ex Market
+
+One-liner:
+  «Маркет ресурсов для рассылки в Telegram — с проверкой, escrow и импортом в панель.»
+
+Отличие от «чатов в Telegram»:
+  • Верификация товара (health-check, sample, метаданные)
+  • Escrow / холд оплаты до приёмки
+  • Один клик «Импорт в exsender» (VDS deploy, upload session, bulk add chats)
+  • Рейтинг продавца, история сделок, dispute flow
+  • Единая валюта оплаты (USDT / баланс exsender / реф. баланс)
+
+Целевая аудитория:
+  • Покупатель — уже платит за exsender, хочет быстрее стартовать кампанию
+  • Продавец — фермер аккаунтов, ресeller VDS, сборщик баз чатов, прокси-провайдер
+  • Платформа — exsender как trust layer + infra
+
+
+═══════════════════════════════════════════════════════════════
+2. КАТАЛОГ ТОВАРОВ (типы листингов)
+═══════════════════════════════════════════════════════════════
+
+2.1 VDS / сервер
+----------------
+Что продаётся:
+  • Чистый VPS (root + SSH) — buyer сам деплоит через exsender
+  • «Под ключ» — seller уже поставил userbot, API-токен, systemd
+  • Подписка на слот (аренда сервера на N дней)
+
+Обязательные поля листинга:
+  • Регион / DC, CPU/RAM/SSD, OS
+  • IPv4 (masked до покупки), bandwidth
+  • Установлен ли exsender-bot, версия
+  • Лимит аккаунтов на сервере (рекомендация)
+  • Способ передачи: SSH key / deploy-key exsender / panel invite
+
+Автопроверки (до публикации / периодически):
+  • ping SSH, uptime 24h
+  • HTTP health userbot API (если уже развёрнут)
+  • blacklist IP check (optional)
+
+Цена: фикс за сервер | аренда / месяц | пакет «3 VDS»
+
+
+2.2 Telegram-аккаунт
+--------------------
+Форматы:
+  • .session файл (Telethon) — стандарт exsender
+  • «Слот на VDS продавца» — доступ к уже привязанному аккаунту (сложнее legally/technically)
+  • Пакет N аккаунтов одной «партии» (batch)
+
+Обязательные поля:
+  • GEO / язык профиля, возраст аккаунта (если известен)
+  • 2FA: да/нет (если да — процесс передачи отдельно)
+  • Прокси: included / buyer brings own
+  • Статус: authorized / needs login / restricted
+  • Spam history: «чистый» / «был flood» (self-declared + optional check)
+
+Автопроверки (MVP+):
+  • Upload .session → exsender sandbox проверяет authorized, get_me, spam_bot (optional)
+  • Proxy test с аккаунта
+  • Sample: 1 аккаунт из пакета бесплатно для verify (для крупных лотов)
+
+Delivery:
+  • Secure download .session (one-time link, encrypted at rest)
+  • Или auto-import в buyer VDS через API exsender (после оплаты)
+
+Цена: за штуку | пакет 10/50/100 | tier (premium GEO)
+
+
+2.3 База чатов
+--------------
+Форматы:
+  • CSV/JSON: chat_id, title, members_count (optional), niche tag
+  • «Готовая кампания»: чаты + рекомендуемый интервал + niche
+  • Подписка на обновление базы (weekly refresh)
+
+Обязательные поля:
+  • Кол-во чатов, язык, тематика (crypto, dating, …)
+  • Тип: group / supergroup / channel comments
+  • GEO / язык аудитории
+  • Дата сборки, % дубликатов (seller declares)
+  • Sample: 5–10 chat_id в открытом preview
+
+Автопроверки:
+  • Sample validation: buyer account проверяет join/send rights на sample
+  • Dedup against buyer existing chats (при импорте в exsender)
+  • % «мёртвых» id (bot can't resolve) — automated scan on listing submit
+
+Delivery:
+  • Download file
+  • «Import to account X on VDS Y» — bulk add через panel API
+
+Цена: за 100 / 1000 чатов | flat за базу | подписка
+
+
+2.4 Bundle (комбо)
+------------------
+  • Starter: 1 VDS + 2 account + 500 chats
+  • Pro: 3 VDS + 10 accounts + 5k chats + proxy list
+  • Custom quote (seller → buyer DM → escrow)
+
+Сильный SKU для новичков после trial exsender.
+
+
+2.5 Услуги (phase 2)
+--------------------
+  • «Настрою рассылку под ключ»
+  • «Прогрев аккаунта 7 дней»
+  • «Подбор базы под нишу»
+
+Фикс price + milestone escrow (50% start, 50% done).
+
+
+═══════════════════════════════════════════════════════════════
+3. РОЛИ И ДОВЕРИЕ
+═══════════════════════════════════════════════════════════════
+
+Роли:
+  • Buyer — покупает, открывает dispute, оставляет review
+  • Seller — создаёт листинг, получает payout после escrow release
+  • Moderator — approve listings, resolve disputes, ban
+  • Platform (exsender admin) — rules, fees, KYC tier (optional)
+
+Seller onboarding:
+  • Регистрация → заявка «Стать продавцом»
+  • Минимальный депозит / hold on platform (anti-scam) — optional P1
+  • Верификация: email + Telegram + (P2) manual KYC для крупных продавцов
+  • Seller dashboard: listings, orders, balance, withdrawals
+
+Trust signals:
+  • Рейтинг 1–5, % успешных сделок, время ответа
+  • Badge: «Verified seller», «Auto-checked», «Top this week»
+  • Escrow: деньги у платформы до confirm или timeout
+  • Dispute window: 24–72h после delivery
+
+
+═══════════════════════════════════════════════════════════════
+4. СДЕЛКА И ОПЛАТА (flow)
+═══════════════════════════════════════════════════════════════
+
+4.1 Покупка (happy path)
+------------------------
+  1. Buyer выбирает листинг → «Купить»
+  2. Оплата: USDT (CryptoBot) | баланс exsender | реф. баланс (partial)
+  3. Order status: paid → delivering
+  4. Seller получает уведомление (TG + email)
+  5. Delivery:
+       - digital: auto (session download / import API)
+       - manual: seller marks delivered + attaches proof
+  6. Buyer: «Принять» или «Спор» (72h auto-accept)
+  7. Release escrow → seller balance (minus fee)
+  8. Review optional
+
+4.2 Escrow states
+-----------------
+  pending_payment → paid → delivering → delivered → completed
+                                    ↘ disputed → refunded / partial / released
+
+4.3 Комиссии (черновик)
+-----------------------
+  • Platform fee: 8–15% с продавца (tier: новый 15%, verified 10%)
+  • Buyer fee: 0% на MVP (проще вход)
+  • Withdrawal seller: USDT, min $20, 1–3% network или flat
+  • Featured listing: платное продвижение в каталоге (P2)
+
+4.4 Refund policy
+-----------------
+  • Digital goods: refund если auto-check failed (session dead, <X% chats valid)
+  • Partial refund если пакет неполный
+  • No refund после auto-accept + buyer imported to production (optional rule)
+
+
+═══════════════════════════════════════════════════════════════
+5. UX / ЭКРАНЫ (MVP)
+═══════════════════════════════════════════════════════════════
+
+Публичные:
+  • /market — каталог с фильтрами (тип, цена, GEO, рейтинг)
+  • /market/listing/{id} — карточка товара, sample, seller profile
+  • /market/seller/{id} — витрина продавца
+
+Для buyer (auth):
+  • /market/orders — мои покупки, статус, download, «Import to exsender»
+  • /market/checkout/{listingId}
+  • Dispute form
+
+Для seller:
+  • /market/sell — wizard создания листинга (по типу товара)
+  • /market/seller/orders — входящие заказы
+  • /market/seller/balance — баланс, вывод
+  • /market/seller/listings — edit, pause, analytics views
+
+Admin:
+  • Модерация листингов (queue)
+  • Disputes
+  • Seller applications
+  • Fee config, banned categories
+
+Интеграция с exsender panel:
+  • Кнопка в sidebar: «Маркет»
+  • После покупки VDS: «Deploy на этот сервер» (prefill SSH)
+  • После session: «Upload to VDS …»
+  • После chats: «Add to account …» wizard
+
+
+═══════════════════════════════════════════════════════════════
+6. ТЕХНИЧЕСКАЯ АРХИТЕКТУРА (когда будете внедрять)
+═══════════════════════════════════════════════════════════════
+
+Не делать отдельный продукт с нуля — модуль в monorepo:
+
+  web/
+    marketplace/
+      listings.py      — CRUD, moderation state
+      orders.py        — escrow, delivery, disputes
+      sellers.py       — seller profile, payout
+      validators.py    — session/chat/vds checks
+      payouts.py       — seller withdrawals
+    content/marketplace_seed_categories.json
+
+  frontend/
+    market.html        — или SPA routes /market/*
+    js/market.js
+    css/market.css
+
+  data/ (per env)
+    marketplace_listings.json
+    marketplace_orders.json
+    marketplace_disputes.json
+    marketplace_seller_balances.json
+
+Связь с существующим:
+  • users.py — seller flag, market_balance_usd (отдельно от referral_balance)
+  • payments.py / CryptoBot — переиспользовать invoice flow
+  • deployer.py — import VDS credentials from order delivery payload
+  • app.py — upload session, bulk chats endpoints вызываются post-purchase
+
+Фоновые jobs:
+  • Listing health recheck (VDS ping, session still auth)
+  • Auto-complete orders after 72h
+  • Auto-refund if delivery timeout (seller didn't deliver 48h)
+
+Security:
+  • .session и SSH secrets — encrypted at rest (AES key in env)
+  • One-time download tokens, expire 15 min
+  • Seller never sees buyer's production VDS; buyer never sees seller payout wallet until withdraw
+  • Audit log всех delivery actions (как admin_audit)
+
+
+═══════════════════════════════════════════════════════════════
+7. МОДЕЛЬ ДАННЫХ (высокий уровень)
+═══════════════════════════════════════════════════════════════
+
+Listing:
+  id, seller_id, type (vds|account|chats|bundle|service)
+  title, description, tags[], geo, price_usd, currency
+  status: draft|pending_review|active|paused|rejected|sold_out
+  stock (int|null for unlimited digital)
+  metadata: { ... type-specific JSON ... }
+  sample_public: { preview fields }
+  auto_check_score, last_check_at
+  views, sales_count, rating_avg
+  created_at, updated_at
+
+Order:
+  id, listing_id, buyer_id, seller_id
+  amount_usd, platform_fee_usd, seller_payout_usd
+  status, payment_invoice_id
+  delivery_payload_encrypted (ref to blob)
+  delivery_method: auto|manual
+  delivered_at, completed_at, dispute_deadline_at
+  import_status: none|pending|done (exsender integration)
+
+Dispute:
+  order_id, opened_by, reason, evidence[], status, resolution, refund_amount
+
+SellerProfile:
+  user_id, display_name, bio, verified_tier
+  balance_usd, pending_escrow_usd, total_earned
+  rating_avg, sales_count, dispute_rate
+  payout_usdt_address (encrypted)
+
+Review:
+  order_id, rating, text, created_at
+
+
+═══════════════════════════════════════════════════════════════
+8. MVP vs ФАЗЫ
+═══════════════════════════════════════════════════════════════
+
+Phase 0 — Discovery (2–3 недели, без кода)
+  • 10 интервью с buyers/sellers (Telegram-чаты ниши)
+  • Анализ 3–5 конкурентов (форумы, TG-боты, dark markets — только UX/fees)
+  • Финализация категорий MVP: только accounts + chats (без VDS)
+  • Legal note: ToS, запрещённые катовары, DMCA-style reports
+
+Phase 1 — MVP (4–6 недель)
+  Scope:
+    • Каталог: accounts (.session packs) + chat bases
+    • Seller: create listing, manual delivery OR file upload auto-delivery
+    • Buyer: pay USDT, download, optional CSV import link
+    • Escrow: manual release by admin OR simple 72h auto-complete
+    • Admin: approve listings, basic disputes
+  Out of scope:
+    • VDS, bundles, auto session health, seller withdrawals automation
+
+Phase 2 — Trust + automation (4–6 нед)
+    • Auto session verify on upload
+    • Sample chat validation
+    • Seller balance + USDT withdraw
+    • Reviews + seller tiers
+    • «Import to exsender» one-click
+
+Phase 3 — VDS + bundles (4–6 нед)
+    • VDS listings + deploy integration
+    • Bundles, featured ads
+    • Dispute automation rules
+
+Phase 4 — Growth
+    • API for sellers (bulk upload)
+    • Affiliate for market (% from referred sales)
+    • Subscriptions на базы чатов
+    • Mini App catalog in Telegram
+
+
+═══════════════════════════════════════════════════════════════
+9. МЕТРИКИ УСПЕХА
+═══════════════════════════════════════════════════════════════
+
+  • GMV (gross merchandise volume) / month
+  • Take rate (platform revenue / GMV)
+  • Conversion: market visit → purchase
+  • Time to first campaign (signup → first send) — должно падать
+  • Dispute rate < 5%
+  • Repeat purchase rate (buyers buying 2+ times / 30d)
+  • % orders with «Import to exsender» — прокси интеграции
+  • Seller retention (active listings / month)
+
+
+═══════════════════════════════════════════════════════════════
+10. РИСКИ И МИТИГАЦИЯ
+═══════════════════════════════════════════════════════════════
+
+  Scam sellers / dead goods
+    → escrow, auto-checks, sample, seller deposit, moderation queue
+
+  Chargeback / payment fraud
+    → crypto only on MVP; no card; velocity limits on new accounts
+
+  Platform liability (spam/abuse)
+    → ToS: buyer responsible for compliance; ban listings «guaranteed no ban»
+    → no marketing «обход всех блокировок»
+
+  Session leak / credential theft
+    → encryption, one-time links, audit, 2FA for seller withdraw
+
+  Race with seller re-selling same session twice
+    → mark session hash sold; optional on-chain-style «sold id» registry
+    → for chats: watermark unique sample per buyer
+
+  VDS «аренда → продажа → откат доступа» (см. раздел 14)
+    → не продавать «голый root без transfer»; automated handover; hold payout
+
+  Cannibalization exsender subscription
+    → market drives subscription (need active plan to import/auto-deploy)
+    → bundle «market purchase includes 7d plan extension» promo
+
+
+═══════════════════════════════════════════════════════════════
+14. VDS-СКАМ: «АРЕНДОВАЛ → ПРОДАЛ → СМЕНИЛ ПАРОЛЬ»
+═══════════════════════════════════════════════════════════════
+
+Сценарий атаки
+--------------
+  1. Scammer арендует VPS у random TG-бота / cheap host (не владелец железа).
+  2. Выставляет на маркет «VDS под spam, root, €5».
+  3. Buyer платит → получает IP + root password.
+  4. Scammer у upstream-провайдера / через panel хостера: reset password, reboot,
+     cancel & re-rent, или просто не продлевает аренду → buyer теряет сервер.
+  5. Escrow уже released → деньги у scammer.
+
+Вывод: продажа «credentials без смены владельца у реального хостера» = почти
+       всегда скам. Площадка не может это полностью убрать, но может сделать
+       атаку невыгодной и технически сложной.
+
+
+Стратегия: три уровня защиты
+----------------------------
+
+Уровень A — Не пускать в каталог (policy)
+  • Запрет листингов «root password only» без verified transfer.
+  • Категории VDS только:
+      (1) «Transfer-ready» — seller доказывает panel хостера (Hetzner, DO, …)
+      (2) «exsender-managed slot» — доступ только через API userbot, не root
+      (3) «Dedicated / owned» — seller tier Verified + deposit $100+
+  • Явный ban: «VDS от перепродажи TG-ботов без SLA transfer» в ToS.
+  • Seller декларирует: «Я владелец аккаунта у хостера Y» + скрин panel (moderation).
+
+Уровень B — Automated handover (техника при покупке)
+  Цель: за 5 минут после оплаты seller теряет возможность зайти, buyer — получает.
+
+  Flow «Secure Transfer» (обязателен для VDS в Phase 3):
+
+    1. Buyer оплатил → order = paid, escrow locked.
+    2. Seller НЕ отдаёт пароль вручную. Вместо этого:
+         • Seller запускает on-server one-time agent (curl script от exsender)
+           ИЛИ seller вводит временный root в secure form → platform runs handover.
+    3. Platform script (SSH):
+         • Создаёт user deploy с sudo только для userbot paths
+         • Генерирует NEW root password (buyer видит один раз)
+         • Устанавливает ТОЛЬКО deploy-key exsender (как в deployer.py)
+         • Меняет root pass / отключает PasswordAuthentication — old pass invalid
+         • Ставит exsender-bot если listing «under key»
+         • Пишет marker /opt/exsender/.market-transfer-{order_id}
+    4. Platform каждые 5 мин (48–72h): health check SSH + userbot API
+    5. Buyer в UI: «Подтвердить доступ» + «Deploy test ping»
+    6. Payout seller только после buyer confirm ИЛИ 72h без dispute
+         + stability window 24–48h
+
+  Если seller не запустил handover за 24h → auto-refund buyer.
+
+Уровень C — Экономика и post-sale
+  • Seller deposit (hold $50–200): dispute «lost access <7 days» → refund from deposit.
+  • Delayed payout: 30% сразу, 70% через 7 дней без dispute (VDS only).
+  • «Access warranty» 7 days: SSH/API пропал → auto-refund если не вина buyer.
+  • Monitoring: platform ping SSH/API daily; fail → freeze payout + alert buyer.
+  • Repeat offender: seller ban + payout address blacklist.
+
+
+Что НЕ продавать
+----------------
+  ✗ «Root login + password в личку»
+  ✗ «VDS без указания хостера»
+  ✗ «Аренда с передачей panel login upstream-провайдера»
+  ✓ «Слот на сервере» — buyer покупает N аккаунтов на API, не root
+  ✓ «Transfer panel invite» — seller adds buyer to Hetzner/DO project (лучший вариант)
+  ✓ «Full transfer» через exsender handover script + new credentials
+
+
+Если buyer всё же потерял доступ
+--------------------------------
+  1. Dispute в warranty window + evidence.
+  2. Platform сверяет health-check logs.
+  3. Fail <7d без buyer misconfig → refund (escrow или deposit) + ban seller.
+
+
+Практический вывод для roadmap
+------------------------------
+  • Phase 1 (MVP): VDS НЕ продаём — только sessions + chat bases.
+  • Phase 3: VDS только через Secure Transfer + delayed payout + deposit.
+  • «Аренда с TG-бота» = reject at moderation.
+
+  Long-term clean option: exsender сам продаёт VDS через API хостера (Hetzner).
+    Buyer покупает у платформы → scam vector исчезает, margin у exsender.
+
+
+═══════════════════════════════════════════════════════════════
+11. GO-TO-MARKET (кратко)
+═══════════════════════════════════════════════════════════════
+
+  • Запуск с 3–5 «founding sellers» (ручной invite, 0% fee 90 days)
+  • Раздел на лендинге + баннер в panel после trial
+  • Пост в changelog + TG channel
+  • Starter bundle exclusive для первых 100 buyers
+  • SEO: «купить telegram аккаунты для рассылки», «база чатов telegram»
+
+
+═══════════════════════════════════════════════════════════════
+12. ОТКРЫТЫЕ ВОПРОСЫ (решить до Phase 1)
+═══════════════════════════════════════════════════════════════
+
+  1. Маркет только для paying users или trial тоже?
+  2. Отдельный домен (market.exsender.top) или /market?
+  3. Seller payouts: manual admin или автомат CryptoBot P2P?
+  4. Хранить .session на сервере или только P2P encrypted + exsender direct import?
+  5. Модерация: pre-moderate все листинги или post-moderate + reports?
+  6. Язык MVP: RU only или EN тоже?
+  7. Связь с referral: % с market sales рефереру buyer/seller?
+
+
+═══════════════════════════════════════════════════════════════
+13. РЕКОМЕНДУЕМЫЙ MVP-SCOPE (если делать минимум)
+═══════════════════════════════════════════════════════════════
+
+  Категории:  Chat bases + Account packs (.session)
+  Оплата:     USDT только
+  Delivery:   File download + кнопка «Импорт чатов в аккаунт»
+  Escrow:     72h auto-complete, admin dispute
+  Sellers:    Invite-only 10 продавцов
+  Fee:        12%
+  Срок:       ~5 недель dev после Phase 0
+
+Это даёт проверку спроса без VDS-интеграции и без полноценного seller wallet.
+
+
+— конец документа —

@@ -14,6 +14,7 @@ Schema (per bot):
   api_token   str — Bearer token to call its API (generated at deploy)
   status      new | deploying | running | stopped | error
   last_deploy_at, last_error, has_ssh_key
+  restart_interval_hours int — auto-restart userbot on VDS (0 = off)
   owner_id    str — user id from users.json; "" = legacy / admin-only
 """
 
@@ -49,6 +50,7 @@ class BotRecord:
     last_deploy_at: Optional[float] = None
     last_error: str = ""
     has_ssh_key: bool = False
+    restart_interval_hours: int = 12
     owner_id: str = ""
 
     def public(self) -> dict[str, Any]:
@@ -70,6 +72,7 @@ class BotRecord:
             "lastDeployAt": d["last_deploy_at"],
             "lastError": d["last_error"],
             "hasSshKey": d["has_ssh_key"],
+            "restartIntervalHours": max(0, int(d["restart_interval_hours"])),
         }
 
 
@@ -166,6 +169,7 @@ class BotRegistry:
         install_dir: str = "/opt/userbot",
         api_port: int = 8080,
         api_token: str = "",
+        restart_interval_hours: int = 12,
         owner_id: str = "",
     ) -> BotRecord:
         bid = uuid.uuid4().hex[:12]
@@ -178,6 +182,13 @@ class BotRegistry:
             install_dir=install_dir.strip() or "/opt/userbot",
             api_port=int(api_port),
             api_token=api_token,
+            restart_interval_hours=max(
+                0,
+                min(
+                    int(12 if restart_interval_hours is None else restart_interval_hours),
+                    168,
+                ),
+            ),
             owner_id=(owner_id or "").strip(),
         )
         self._cache[bid] = rec
@@ -200,3 +211,16 @@ class BotRegistry:
         del self._cache[bid]
         self._save()
         return True
+
+    def remove_for_owner(self, owner_id: str) -> list[str]:
+        oid = (owner_id or "").strip()
+        if not oid:
+            return []
+        removed: list[str] = []
+        for bid in list(self._cache.keys()):
+            if self._cache[bid].owner_id == oid:
+                del self._cache[bid]
+                removed.append(bid)
+        if removed:
+            self._save()
+        return removed

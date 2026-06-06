@@ -29,6 +29,8 @@ from data_paths import data_file
 WEB_DIR = Path(__file__).resolve().parent
 USERS_FILE = data_file("users.json")
 
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "1") or 1)
+
 PBKDF2_ITERS = 200_000
 PBKDF2_DKLEN = 32
 
@@ -71,19 +73,35 @@ class UserRecord:
     blocked: bool = False
     referral_code: str = ""
     referred_by: str = ""
+    trial_used: bool = False
+    referral_balance_usd: float = 0.0
+    referral_earned_total: float = 0.0
 
     def public(self) -> dict[str, Any]:
-        return {
+        now = time.time()
+        active = self.plan_expires_at > now and not self.blocked
+        remaining = max(0.0, self.plan_expires_at - now) if active else 0.0
+        d: dict[str, Any] = {
             "id": self.id,
             "email": self.email,
             "name": self.name,
             "plan": self.plan,
             "planExpiresAt": self.plan_expires_at,
-            "planActive": self.plan_expires_at > time.time() and not self.blocked,
+            "planActive": active,
+            "isTrial": self.plan == "trial" and active,
+            "planRemainingSec": int(remaining),
+            "planDaysLeft": round(remaining / 86400, 2),
             "createdAt": self.created_at,
             "blocked": self.blocked,
             "referralCode": self.referral_code,
+            "referralBalanceUsd": round(float(self.referral_balance_usd or 0), 2),
+            "referralEarnedTotal": round(float(self.referral_earned_total or 0), 2),
         }
+        if self.plan == "trial" and active:
+            from trial_limits import trial_limits_meta
+
+            d["trialLimits"] = trial_limits_meta()
+        return d
 
     def admin_view(self) -> dict[str, Any]:
         d = self.public()
@@ -136,6 +154,9 @@ class UserStore:
                     blocked=bool(row.get("blocked", False)),
                     referral_code=str(row.get("referral_code", "")),
                     referred_by=str(row.get("referred_by", "")),
+                    trial_used=bool(row.get("trial_used", False)),
+                    referral_balance_usd=float(row.get("referral_balance_usd", 0) or 0),
+                    referral_earned_total=float(row.get("referral_earned_total", 0) or 0),
                 )
             except (KeyError, ValueError):
                 continue
@@ -197,6 +218,10 @@ class UserStore:
                 referral_code=_gen_referral_code(codes),
                 referred_by=referred_by.strip(),
             )
+            if TRIAL_DAYS > 0:
+                rec.plan = "trial"
+                rec.plan_expires_at = time.time() + float(TRIAL_DAYS) * 86400.0
+                rec.trial_used = True
             self._users[uid] = rec
             self._email_idx[email_norm] = uid
             self._save_locked()
@@ -249,6 +274,38 @@ class UserStore:
             invoice_id=invoice_id,
         )
 
+    def add_referral_credit(self, user_id: str, amount_usd: float) -> Optional[UserRecord]:
+        amount = round(float(amount_usd), 2)
+        if amount <= 0:
+            return self.get(user_id)
+        with self._lock:
+            rec = self._users.get(user_id)
+            if rec is None:
+                return None
+            rec.referral_balance_usd = round(
+                float(rec.referral_balance_usd or 0) + amount, 2
+            )
+            rec.referral_earned_total = round(
+                float(rec.referral_earned_total or 0) + amount, 2
+            )
+            self._save_locked()
+            return rec
+
+    def spend_referral_credit(self, user_id: str, amount_usd: float) -> Optional[UserRecord]:
+        amount = round(float(amount_usd), 2)
+        if amount <= 0:
+            return self.get(user_id)
+        with self._lock:
+            rec = self._users.get(user_id)
+            if rec is None:
+                return None
+            bal = float(rec.referral_balance_usd or 0)
+            if amount > bal:
+                raise ValueError("Недостаточно реферального баланса")
+            rec.referral_balance_usd = round(bal - amount, 2)
+            self._save_locked()
+            return rec
+
     def touch_login(self, user_id: str) -> None:
         with self._lock:
             rec = self._users.get(user_id)
@@ -282,11 +339,30 @@ class UserStore:
     def list_users(self) -> list[UserRecord]:
         return list(self._users.values())
 
+    def delete(self, user_id: str) -> Optional[UserRecord]:
+        with self._lock:
+            rec = self._users.get(user_id)
+            if rec is None:
+                return None
+            email = rec.email
+            del self._users[user_id]
+            self._email_idx.pop(email, None)
+            for u in self._users.values():
+                if u.referred_by == user_id:
+                    u.referred_by = ""
+            self._save_locked()
+            return rec
+
 
 # ============================================================================
 # Subscription plans (USD)
 # ============================================================================
 PLANS: dict[str, dict[str, Any]] = {
+    "trial": {
+        "label": "Trial",
+        "duration_days": TRIAL_DAYS,
+        "price_usd": 0.0,
+    },
     "week": {
         "label": "Week",
         "duration_days": 7,

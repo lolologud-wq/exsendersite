@@ -28,6 +28,7 @@ class ChatSpamConfig:
     message_limit: Optional[int] = None
     messages_sent: int = 0
     start_delay_min: Optional[float] = None
+    last_sent_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +44,7 @@ class ChatSpamConfig:
             "message_limit": self.message_limit,
             "messages_sent": self.messages_sent,
             "start_delay_min": self.start_delay_min,
+            "last_sent_at": float(self.last_sent_at or 0),
         }
 
     @classmethod
@@ -88,6 +90,7 @@ class ChatSpamConfig:
                 if d.get("start_delay_min") is not None
                 else None
             ),
+            last_sent_at=float(d.get("last_sent_at", 0) or 0),
         )
 
 
@@ -107,6 +110,8 @@ class RuntimeState:
     errors_total: int = 0
     # Bumped when interval settings change — spam_loop clears per-chat timers.
     interval_seq: int = 0
+    # Wall-clock timestamp of last send on this account (survives restart/redeploy).
+    last_send_at: float = 0.0
     chat_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def cfg(self, chat_id: int) -> ChatSpamConfig:
@@ -171,6 +176,7 @@ def _runtime_state_from_flat_dict(raw: dict[str, Any]) -> RuntimeState:
         global_source_message_id=(int(gmid) if gmid is not None else None),
         errors_total=int(raw.get("errors_total", 0) or 0),
         interval_seq=int(raw.get("interval_seq", 0) or 0),
+        last_send_at=float(raw.get("last_send_at", 0) or 0),
         chat_configs=chat_configs,
     )
 

@@ -68,6 +68,7 @@ class InvoiceRecord:
     paid_at: float = 0.0
     promo_code: str = ""
     base_amount_usd: float = 0.0
+    referral_credit_usd: float = 0.0
 
 
 class InvoiceStore:
@@ -101,6 +102,7 @@ class InvoiceStore:
                     paid_at=float(row.get("paid_at", 0) or 0),
                     promo_code=str(row.get("promo_code", "")),
                     base_amount_usd=float(row.get("base_amount_usd", 0) or 0),
+                    referral_credit_usd=float(row.get("referral_credit_usd", 0) or 0),
                 )
             except (KeyError, ValueError):
                 continue

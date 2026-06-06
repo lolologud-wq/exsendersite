@@ -50,12 +50,18 @@ $remote = "${User}@${ServerHost}"
 Write-Host "==> Upload to $remote"
 
 & scp @scpArgs $Tmp "${remote}:/tmp/exsender-site.tar.gz"
-& scp @scpArgs (Join-Path $Root "deploy/site/install-on-server.sh") "${remote}:/tmp/install-on-server.sh"
-if ($LASTEXITCODE -ne 0) { throw "scp failed" }
+if ($LASTEXITCODE -ne 0) { throw "scp archive failed" }
+
+$InstallSh = Join-Path $Root "deploy/site/install-on-server.sh"
+$InstallShLf = Join-Path $env:TEMP "install-on-server.sh"
+(Get-Content -Raw -Encoding UTF8 $InstallSh) -replace "`r`n", "`n" | Set-Content -NoNewline -Encoding UTF8 $InstallShLf
+& scp @scpArgs $InstallShLf "${remote}:/tmp/install-on-server.sh"
+if ($LASTEXITCODE -ne 0) { throw "scp install script failed" }
 
 Write-Host "==> Install on server (nginx + systemd + certbot)"
-$installCmd = "chmod +x /tmp/install-on-server.sh; bash /tmp/install-on-server.sh $Domain /tmp/exsender-site.tar.gz"
+$installCmd = "sed -i 's/\r$//' /tmp/install-on-server.sh; chmod +x /tmp/install-on-server.sh; bash /tmp/install-on-server.sh $Domain /tmp/exsender-site.tar.gz"
 & ssh @sshArgs $remote $installCmd
+if ($LASTEXITCODE -ne 0) { throw "remote install failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
 Write-Host "Done. Open https://$Domain/login"

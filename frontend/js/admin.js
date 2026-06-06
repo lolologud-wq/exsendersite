@@ -290,7 +290,7 @@
     const body = document.getElementById("admUsersBody");
     if (!body) return;
     if (!items?.length) {
-      body.innerHTML = '<tr><td colspan="6" class="adm-empty">Пользователей пока нет.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="adm-empty">Пользователей пока нет.</td></tr>';
       return;
     }
     body.innerHTML = items.map((u) => {
@@ -299,16 +299,20 @@
       let statusTxt = "нет плана";
       if (u.blocked) { statusCls = "adm-pill-block"; statusTxt = "заблокирован"; }
       else if (active) { statusCls = "adm-pill-ok"; statusTxt = "активен"; }
+      const refBal = Number(u.referralBalanceUsd || 0);
       return `
         <tr data-uid="${escapeHtml(u.id)}">
           <td>${escapeHtml(u.email)}</td>
           <td><code>${escapeHtml(u.referralCode || "—")}</code></td>
+          <td><b>${escapeHtml(fmtUsd(refBal))}</b></td>
           <td>${escapeHtml(u.plan || "—")}</td>
           <td>${escapeHtml(active ? fmtDate(u.planExpiresAt) : "—")}</td>
           <td><span class="adm-pill ${statusCls}">${statusTxt}</span></td>
           <td class="adm-actions">
             <button type="button" class="btn-ghost adm-btn-sm" data-act="grant" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}">+план</button>
+            <button type="button" class="btn-ghost adm-btn-sm" data-act="ref" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}" data-balance="${refBal}">+реф</button>
             <button type="button" class="btn-ghost adm-btn-sm" data-act="block" data-uid="${escapeHtml(u.id)}" data-blocked="${u.blocked ? "1" : "0"}">${u.blocked ? "разблок" : "блок"}</button>
+            <button type="button" class="btn-danger adm-btn-sm" data-act="delete" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}" title="Удалить аккаунт">удалить</button>
           </td>
         </tr>`;
     }).join("");
@@ -332,6 +336,21 @@
             ${p.active ? "Выкл" : "Вкл"}
           </button>
         </td>
+      </tr>`).join("");
+  }
+
+  function renderChangelog(items) {
+    const body = document.getElementById("admChangelogBody");
+    if (!body) return;
+    if (!items?.length) {
+      body.innerHTML = '<tr><td colspan="3" class="adm-empty">Записей нет.</td></tr>';
+      return;
+    }
+    body.innerHTML = items.map((e) => `
+      <tr>
+        <td>${escapeHtml(e.date || fmtDate(e.createdAt))}</td>
+        <td><code>${escapeHtml(e.version || "—")}</code></td>
+        <td>${escapeHtml(e.title)}</td>
       </tr>`).join("");
   }
 
@@ -366,6 +385,10 @@
     renderUsers(data.recentUsers);
     renderPromos(data.promos);
     renderAudit(data.auditLog);
+    try {
+      const cl = await api("GET", "/api/admin/changelog");
+      renderChangelog(cl.items);
+    } catch (_) { /* ignore */ }
     const full = await api("GET", "/api/admin/users");
     renderUsers(full.users);
   }
@@ -407,6 +430,26 @@
       } catch (err) { showAlert(err.message); }
     });
 
+    document.getElementById("admRefBalanceForm")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = document.getElementById("refBalanceEmail").value.trim();
+      const amount = Number(document.getElementById("refBalanceAmount").value);
+      const note = document.getElementById("refBalanceNote").value.trim();
+      const uid = findUserIdByEmail(email);
+      if (!uid) { showAlert("Пользователь не найден"); return; }
+      if (!amount || amount <= 0) { showAlert("Укажи сумму больше 0"); return; }
+      try {
+        const res = await api("POST", `/api/admin/users/${encodeURIComponent(uid)}/referral-balance`, {
+          amountUsd: amount,
+          note,
+        });
+        const bal = res.profile?.referralBalanceUsd ?? amount;
+        showAlert(`Начислено ${fmtUsd(amount)} → баланс ${fmtUsd(bal)} (${email})`, "ok");
+        e.target.reset();
+        await load();
+      } catch (err) { showAlert(err.message); }
+    });
+
     document.getElementById("admPromoForm")?.addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
@@ -442,6 +485,14 @@
       } catch (err) { showAlert(err.message); }
     });
 
+    document.getElementById("admNotifyClear")?.addEventListener("click", async () => {
+      if (!confirm("Удалить все уведомления у всех пользователей?")) return;
+      try {
+        const res = await api("DELETE", "/api/admin/notify");
+        showAlert(`Удалено: ${res.removed}`, "ok");
+      } catch (err) { showAlert(err.message); }
+    });
+
     document.getElementById("admUsersBody")?.addEventListener("click", async (e) => {
       const btn = e.target.closest("[data-act]");
       if (!btn) return;
@@ -452,12 +503,32 @@
         document.getElementById("grantEmail").scrollIntoView({ behavior: "smooth", block: "center" });
         return;
       }
+      if (act === "ref") {
+        document.getElementById("refBalanceEmail").value = btn.dataset.email || "";
+        document.getElementById("refBalanceAmount").focus();
+        document.getElementById("refBalanceEmail").scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
       if (act === "block") {
         const blocked = btn.dataset.blocked !== "1";
         if (blocked && !confirm(`Заблокировать ${btn.dataset.email || uid}?`)) return;
         try {
           await api("POST", `/api/admin/users/${encodeURIComponent(uid)}/block`, { blocked });
           showAlert(blocked ? "Заблокирован" : "Разблокирован", "ok");
+          await load();
+        } catch (err) { showAlert(err.message); }
+        return;
+      }
+      if (act === "delete") {
+        const email = btn.dataset.email || uid;
+        const ok = confirm(
+          `Удалить аккаунт ${email}?\n\n` +
+          "Логин перестанет работать. VDS пользователя исчезнут из панели (сами серверы не удаляются)."
+        );
+        if (!ok) return;
+        try {
+          const res = await api("DELETE", `/api/admin/users/${encodeURIComponent(uid)}`);
+          showAlert(`Удалён: ${res.email || email}`, "ok");
           await load();
         } catch (err) { showAlert(err.message); }
       }
@@ -471,6 +542,23 @@
       try {
         await api("PATCH", `/api/admin/promos/${encodeURIComponent(code)}`, { active });
         await load();
+      } catch (err) { showAlert(err.message); }
+    });
+
+    document.getElementById("admChangelogForm")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api("POST", "/api/admin/changelog", {
+          version: document.getElementById("clVersion").value.trim(),
+          date: document.getElementById("clDate").value.trim(),
+          title: document.getElementById("clTitle").value.trim(),
+          tags: document.getElementById("clTags").value.trim(),
+          body: document.getElementById("clBody").value.trim(),
+        });
+        showAlert("Запись опубликована", "ok");
+        e.target.reset();
+        const cl = await api("GET", "/api/admin/changelog");
+        renderChangelog(cl.items);
       } catch (err) { showAlert(err.message); }
     });
 

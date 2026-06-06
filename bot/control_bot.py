@@ -26,6 +26,7 @@ from telegram.ext import (
 
 from proxy_util import parse_proxy
 from telethon_accounts import connect_client_with_fallback, make_telethon_client, session_path
+from telethon_client_profile import get_telegram_api_config, request_login_code
 from telethon_join import join_chat_or_channel_by_link, resolve_tme_post_for_forward
 from spam_scheduler import start_spam_loop_background
 from state import (
@@ -40,6 +41,8 @@ from state import (
 )
 
 logger = logging.getLogger(__name__)
+
+API_CONFIG = get_telegram_api_config()
 PARSE = "HTML"
 PER_PAGE = 6
 
@@ -959,8 +962,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await q.answer("Нет такого слота.", show_alert=True)
             return
         clients: dict = context.bot_data["telethon_clients"]
-        api_id = int(os.environ["API_ID"])
-        api_hash = os.environ["API_HASH"]
+        api_id = API_CONFIG.api_id
+        api_hash = API_CONFIG.api_hash
         client = clients.get(new_id)
         created = client is None
         if created:
@@ -969,6 +972,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 api_id,
                 api_hash,
                 proxy_raw=multi.accounts[new_id].proxy,
+                profile=API_CONFIG,
             )
         try:
             client = await connect_client_with_fallback(
@@ -978,6 +982,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 api_hash=api_hash,
                 proxy_raw=multi.accounts[new_id].proxy,
                 allow_direct_fallback=False,
+                profile=API_CONFIG,
             )
         except Exception as e:
             ok = await _answer_callback_resilient(
@@ -1704,14 +1709,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         multi = context.bot_data["multi"]
         clients: dict = context.bot_data["telethon_clients"]
         client = clients.get(aid)
-        api_id = int(os.environ["API_ID"])
-        api_hash = os.environ["API_HASH"]
+        api_id = API_CONFIG.api_id
+        api_hash = API_CONFIG.api_hash
         if client is None:
             client = make_telethon_client(
                 aid,
                 api_id,
                 api_hash,
                 proxy_raw=multi.accounts[aid].proxy,
+                profile=API_CONFIG,
             )
         try:
             client = await connect_client_with_fallback(
@@ -1721,6 +1727,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 api_hash=api_hash,
                 proxy_raw=multi.accounts[aid].proxy,
                 allow_direct_fallback=False,
+                profile=API_CONFIG,
             )
         except Exception as e:
             await update.message.reply_text(
@@ -1731,7 +1738,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         clients[aid] = client
         try:
-            sent = await client.send_code_request(phone)
+            sent = await request_login_code(client, phone)
         except PhoneNumberInvalidError:
             await update.message.reply_text("Неверный номер телефона.")
             return
@@ -1858,13 +1865,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _persist(context)
         clients: dict = context.bot_data["telethon_clients"]
         if new_id not in clients:
-            api_id = int(os.environ["API_ID"])
-            api_hash = os.environ["API_HASH"]
+            api_id = API_CONFIG.api_id
+            api_hash = API_CONFIG.api_hash
             nc = make_telethon_client(
                 new_id,
                 api_id,
                 api_hash,
                 proxy_raw=multi.accounts[new_id].proxy,
+                profile=API_CONFIG,
             )
             try:
                 nc = await connect_client_with_fallback(
@@ -1874,6 +1882,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     api_hash=api_hash,
                     proxy_raw=multi.accounts[new_id].proxy,
                     allow_direct_fallback=False,
+                    profile=API_CONFIG,
                 )
             except Exception as e:
                 context.user_data.pop("wait", None)

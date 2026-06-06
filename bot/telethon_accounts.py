@@ -8,6 +8,7 @@ import os
 from telethon import TelegramClient
 
 from proxy_util import parse_proxy
+from telethon_client_profile import TelegramApiConfig, telethon_client_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def make_telethon_client(
     api_hash: str,
     *,
     proxy_raw: str | None = None,
+    profile: TelegramApiConfig | None = None,
 ) -> TelegramClient:
     cr = int(os.getenv("TELETHON_CONNECTION_RETRIES", "5"))
     rd = float(os.getenv("TELETHON_RETRY_DELAY", "1"))
@@ -39,6 +41,7 @@ def make_telethon_client(
             account_id,
             proxy_raw,
         )
+    extra = telethon_client_kwargs(profile) if profile else {}
     return TelegramClient(
         session_path(account_id),
         api_id,
@@ -46,6 +49,7 @@ def make_telethon_client(
         connection_retries=max(1, cr),
         retry_delay=rd,
         proxy=proxy,
+        **extra,
     )
 
 
@@ -57,6 +61,7 @@ async def connect_client_with_fallback(
     api_hash: str,
     proxy_raw: str | None,
     allow_direct_fallback: bool = False,
+    profile: TelegramApiConfig | None = None,
 ) -> TelegramClient:
     """
     Подключает клиент с fallback:
@@ -79,6 +84,7 @@ async def connect_client_with_fallback(
                 api_id,
                 api_hash,
                 proxy_raw=f"http://{proxy_s}",
+                profile=profile,
             )
             await alt.connect()
             logger.warning(
@@ -96,6 +102,7 @@ async def connect_client_with_fallback(
                 api_id,
                 api_hash,
                 proxy_raw=None,
+                profile=profile,
             )
             await direct.connect()
             logger.warning("Userbot [%s]: подключён без прокси (fallback).", account_id)

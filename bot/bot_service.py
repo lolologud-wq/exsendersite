@@ -48,6 +48,7 @@ from telethon_accounts import (
     make_telethon_client,
     session_path,
 )
+from telethon_client_profile import TelegramApiConfig, request_login_code
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +145,14 @@ class BotService:
         *,
         api_id: int,
         api_hash: str,
+        api_config: TelegramApiConfig | None = None,
         save: Callable[[], None] | None = None,
     ) -> None:
         self.multi = multi
         self.clients = telethon_clients
         self.api_id = api_id
         self.api_hash = api_hash
+        self.api_config = api_config
         self._save = save or (lambda: save_multi_account_state(self.multi))
         # Multi-step Telethon auth state per slot:
         #   {aid: {"phone": str, "hash": str, "client": TelegramClient}}
@@ -252,7 +255,8 @@ class BotService:
 
         for acc, aid in zip(accounts, order):
             client = self.clients.get(aid)
-            acc["authorized"] = await _telethon_ready(client)
+            connected = bool(client and client.is_connected())
+            acc["authorized"] = connected
             acc["health"] = _compute_health(
                 aid,
                 self.multi.accounts[aid],
@@ -538,16 +542,13 @@ class BotService:
     # =================================================================== spam
     async def set_spam(self, slot_id: str, running: bool) -> dict[str, Any]:
         state = self._require_account(slot_id)
-        client = self.clients.get(slot_id)
         if running:
+            client = await self._ensure_client(slot_id)
             ok, err = validate_spam_start(state, await _telethon_ready(client))
             if not ok:
                 raise ServiceError(err)
             state.spam_running = True
-            if client is not None:
-                start_spam_loop_background(
-                    client, state, persist=self._save, account_key=slot_id
-                )
+            self._ensure_spam_loop(slot_id, client)
         else:
             state.spam_running = False
         self._save()
@@ -671,6 +672,12 @@ class BotService:
             state.set_cfg(cid, cfg)
             count += 1
         self._save()
+        if enabled and state.spam_running:
+            try:
+                client = await self._ensure_client(slot_id)
+                self._ensure_spam_loop(slot_id, client)
+            except Exception as e:
+                logger.warning("bulk_set_chats_enabled[%s]: spam loop: %s", slot_id, e)
         return {"ok": True, "count": count, "enabled": bool(enabled)}
 
     async def delete_chat(self, slot_id: str, chat_id_raw: Any) -> None:
@@ -682,12 +689,74 @@ class BotService:
         self._save()
 
     # ======================================================== Telethon AUTH
+    async def _disconnect_client(self, slot_id: str) -> None:
+        client = self.clients.pop(slot_id, None)
+        if client is None:
+            return
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception:
+            pass
+
+    async def _ensure_client_for_auth(self, slot_id: str) -> TelegramClient:
+        """Auth must go through the slot proxy — never fall back to bare VDS IP."""
+        state = self._require_account(slot_id)
+        proxy_raw = (state.proxy or "").strip()
+        require_proxy = os.getenv("TELEGRAM_AUTH_REQUIRE_PROXY", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        if require_proxy and not proxy_raw:
+            raise ServiceError(
+                "Перед отправкой кода укажи прокси для этого слота. "
+                "С одного IP VDS Telegram часто не шлёт коды — нужен отдельный "
+                "мобильный/резидентский прокси на каждый аккаунт."
+            )
+        if require_proxy and parse_proxy(proxy_raw) is None:
+            raise ServiceError(
+                "Прокси задан, но формат неверный. "
+                "Пример: login:pass@host:port или socks5://login:pass@host:port"
+            )
+
+        await self._disconnect_client(slot_id)
+        client = make_telethon_client(
+            slot_id,
+            self.api_id,
+            self.api_hash,
+            proxy_raw=proxy_raw or None,
+            profile=self.api_config,
+        )
+        try:
+            client = await connect_client_with_fallback(
+                client,
+                account_id=slot_id,
+                api_id=self.api_id,
+                api_hash=self.api_hash,
+                proxy_raw=proxy_raw or None,
+                allow_direct_fallback=False,
+                profile=self.api_config,
+            )
+        except Exception as e:
+            raise ServiceError(
+                f"Не удалось подключиться через прокси: {e}. "
+                "Проверь прокси (кнопка «Проверить») — без рабочего прокси код с VDS не придёт."
+            ) from e
+        self.clients[slot_id] = client
+        return client
+
     async def _ensure_client(self, slot_id: str) -> TelegramClient:
         state = self._require_account(slot_id)
         client = self.clients.get(slot_id)
         if client is None:
             client = make_telethon_client(
-                slot_id, self.api_id, self.api_hash, proxy_raw=state.proxy
+                slot_id,
+                self.api_id,
+                self.api_hash,
+                proxy_raw=state.proxy,
+                profile=self.api_config,
             )
             client = await connect_client_with_fallback(
                 client,
@@ -696,14 +765,38 @@ class BotService:
                 api_hash=self.api_hash,
                 proxy_raw=state.proxy,
                 allow_direct_fallback=True,
+                profile=self.api_config,
             )
             self.clients[slot_id] = client
         elif not client.is_connected():
             try:
                 await client.connect()
-            except Exception as e:
-                raise ServiceError(f"Не удалось подключиться: {e}") from e
+            except Exception:
+                await self._disconnect_client(slot_id)
+                client = make_telethon_client(
+                    slot_id,
+                    self.api_id,
+                    self.api_hash,
+                    proxy_raw=state.proxy,
+                    profile=self.api_config,
+                )
+                client = await connect_client_with_fallback(
+                    client,
+                    account_id=slot_id,
+                    api_id=self.api_id,
+                    api_hash=self.api_hash,
+                    proxy_raw=state.proxy,
+                    allow_direct_fallback=True,
+                    profile=self.api_config,
+                )
+                self.clients[slot_id] = client
         return client
+
+    def _ensure_spam_loop(self, slot_id: str, client: TelegramClient) -> None:
+        state = self._require_account(slot_id)
+        start_spam_loop_background(
+            client, state, persist=self._save, account_key=slot_id
+        )
 
     async def auth_send_code(self, slot_id: str, phone: str) -> dict[str, Any]:
         self._require_account(slot_id)
@@ -712,7 +805,7 @@ class BotService:
             raise ServiceError("phone обязателен")
         client = await self._ensure_client(slot_id)
         try:
-            sent = await client.send_code_request(phone)
+            sent = await request_login_code(client, phone)
         except Exception as e:
             raise ServiceError(f"send_code_request: {e}") from e
         self._pending_auth[slot_id] = {
@@ -772,9 +865,7 @@ class BotService:
     ) -> dict[str, Any]:
         self._pending_auth.pop(slot_id, None)
         me = await client.get_me()
-        start_spam_loop_background(
-            client, state, persist=self._save, account_key=slot_id
-        )
+        self._ensure_spam_loop(slot_id, client)
         self._save()
         return {
             "ok": True,
@@ -812,7 +903,11 @@ class BotService:
         state = self.multi.accounts[slot_id]
         try:
             client = make_telethon_client(
-                slot_id, self.api_id, self.api_hash, proxy_raw=state.proxy
+                slot_id,
+                self.api_id,
+                self.api_hash,
+                proxy_raw=state.proxy,
+                profile=self.api_config,
             )
             client = await connect_client_with_fallback(
                 client,
@@ -821,6 +916,7 @@ class BotService:
                 api_hash=self.api_hash,
                 proxy_raw=state.proxy,
                 allow_direct_fallback=True,
+                profile=self.api_config,
             )
         except Exception as e:
             raise ServiceError(f"connect: {e}") from e
@@ -829,9 +925,7 @@ class BotService:
         authorized = await client.is_user_authorized()
         if authorized:
             me = await client.get_me()
-            start_spam_loop_background(
-                client, state, persist=self._save, account_key=slot_id
-            )
+            self._ensure_spam_loop(slot_id, client)
             self._save()
             return {
                 "ok": True,

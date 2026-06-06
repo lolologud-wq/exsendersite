@@ -9,7 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=20260524p3" />
+  <link rel="stylesheet" href="css/style.css?v=20260530pie2" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260528mob3" />
 </head>
 <body>
   <div class="app">
@@ -110,7 +111,7 @@
     <main class="main">
       <div class="sub-banner" id="subBanner" hidden>
         <span id="subBannerText">Подписка не активна.</span>
-        <a class="btn-primary sub-banner-btn" href="/profile">Оформить подписку</a>
+        <a class="btn-primary sub-banner-btn" id="subBannerBtn" href="/profile">Оформить подписку</a>
       </div>
       <header class="topbar">
         <div class="topbar-left">
@@ -506,6 +507,7 @@
                   <th>Статус</th>
                   <th>Установлен в</th>
                   <th>Последний деплой</th>
+                  <th>Авто-перезапуск</th>
                   <th>Ключ</th>
                   <th class="th-actions">Действия</th>
                 </tr>
@@ -519,6 +521,7 @@
           <b>Как это работает.</b> Сайт деплоит бота на VDS по SSH и управляет им через HTTP API.
           После деплоя управляй аккаунтами во вкладке «Аккаунты» — при добавлении выбери VDS.
           Пароль SSH не сохраняется: при первом деплое ставится deploy-ключ (<code>web/deploy_key</code>).
+          <b>Авто-перезапуск</b> — systemd-таймер на VDS перезапускает бота по расписанию (помогает, если аккаунты «залипают»).
         </div>
       </div><!-- /data-view=servers -->
     </main>
@@ -543,6 +546,6 @@
   <div class="toasts" id="toasts"></div>
 
   <script src="js/http.js"></script>
-  <script src="js/app.js?v=20260525"></script>
+  <script src="js/app.js?v=20260530fix5"></script>
 </body>
 </html>

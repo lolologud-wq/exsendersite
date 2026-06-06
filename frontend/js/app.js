@@ -33,6 +33,7 @@ const STATE = {
   chatsSearch: "",
   settingsBotId: "",
   settingsAccountKey: "",
+  settingsFormDirty: false,
   sourcesBotId: "",
   sourcesAccountKey: "",
   sourcesChatContext: null,
@@ -43,7 +44,54 @@ const STATE = {
   activityCache: null,
   chatsLoading: false,
   chatsDialogsCache: new Map(),
+  botsLoadedAt: 0,
+  dashboardPolls: 0,
 };
+
+const BOTS_REFRESH_MS = 60000;
+const DASHBOARD_POLL_MAX = 12;
+
+let meProfile = null;
+
+function countAllAccounts() {
+  let n = 0;
+  for (const pack of STATE.allOverviews || []) {
+    n += (pack.overview?.accounts || []).length;
+  }
+  return n;
+}
+
+function trialQuotaMessage(kind) {
+  const lim = meProfile?.trialLimits;
+  if (!meProfile?.isTrial || !lim) return "";
+  if (kind === "bot") {
+    return `На триале доступен максимум ${lim.maxBots} сервер. Оформи тариф в профиле.`;
+  }
+  return `На триале доступно максимум ${lim.maxAccounts} аккаунта. Оформи тариф в профиле.`;
+}
+
+function canAddTrialBot() {
+  const lim = meProfile?.trialLimits;
+  if (!meProfile?.isTrial || !lim) return true;
+  const used = lim.botsUsed ?? STATE.bots.length;
+  if (used >= lim.maxBots) {
+    toast(trialQuotaMessage("bot"), "info", 6000);
+    return false;
+  }
+  return true;
+}
+
+function canAddTrialAccount(slotId, botId) {
+  const lim = meProfile?.trialLimits;
+  if (!meProfile?.isTrial || !lim) return true;
+  if (slotId && botId && findAccount(slotId, botId)) return true;
+  const used = lim.accountsUsed ?? countAllAccounts();
+  if (used >= lim.maxAccounts) {
+    toast(trialQuotaMessage("account"), "info", 6000);
+    return false;
+  }
+  return true;
+}
 
 const CHATS_CACHE_TTL_MS = 120_000;
 const CHATS_FETCH_CONCURRENCY = 4;
@@ -150,6 +198,7 @@ async function uploadSessionFile(slotId, file, proxy, botId) {
 // bots registry (VDS)
 const listBots          = ()                 => siteApi("GET",    "/api/bots").then((r) => r.bots || []);
 const addBot            = (body)             => siteApi("POST",   "/api/bots", body);
+const patchBot          = (bid, body)        => siteApi("PATCH",  `/api/bots/${encodeURIComponent(bid)}`, body);
 const removeBot         = (bid)              => siteApi("DELETE", `/api/bots/${encodeURIComponent(bid)}`);
 const deployBot         = (bid, body)        => siteApi("POST",   `/api/bots/${encodeURIComponent(bid)}/deploy`, body);
 const restartBot        = (bid, body)        => siteApi("POST",   `/api/bots/${encodeURIComponent(bid)}/restart`, body || {});
@@ -256,19 +305,25 @@ function aggregateOverview(packs) {
 }
 
 async function fetchAllOverviews() {
-  await loadBots();
-  const packs = [];
-  for (const bot of STATE.bots) {
-    if (!bot.hasApiToken && bot.status === "new") continue;
-    try {
-      const overview = await fetchOverviewForBot(bot.id);
-      packs.push({ bot, overview });
-    } catch (e) {
-      console.warn("overview failed", bot.id, e);
-    }
+  if (!STATE.bots.length) await loadBots();
+  const targets = STATE.bots.filter((bot) => bot.hasApiToken || bot.status !== "new");
+  if (STATE.allOverviews.length && targets.length === STATE.allOverviews.length) {
+    const age = Date.now() - (STATE.botsLoadedAt || 0);
+    if (age < 4000) return STATE.allOverviews;
   }
-  STATE.allOverviews = packs;
-  return packs;
+  const results = await Promise.all(
+    targets.map(async (bot) => {
+      try {
+        const overview = await fetchOverviewForBot(bot.id);
+        return { bot, overview };
+      } catch (e) {
+        console.warn("overview failed", bot.id, e);
+        return null;
+      }
+    }),
+  );
+  STATE.allOverviews = results.filter(Boolean);
+  return STATE.allOverviews;
 }
 
 function flattenAccounts() {
@@ -559,32 +614,119 @@ function pieSlicePath(cx, cy, r, startDeg, endDeg) {
   return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
 }
 
+function donutSlicePath(cx, cy, rOuter, rInner, startDeg, endDeg) {
+  const toRad = (deg) => ((deg - 90) * Math.PI) / 180;
+  const sweep = endDeg - startDeg;
+  if (sweep <= 0.05) return "";
+  if (sweep >= 359.95) {
+    return [
+      `M ${cx} ${cy - rOuter}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${cx - 0.001} ${cy - rOuter}`,
+      `L ${cx - 0.001} ${cy - rInner}`,
+      `A ${rInner} ${rInner} 0 1 0 ${cx} ${cy - rInner}`,
+      "Z",
+    ].join(" ");
+  }
+  const large = sweep > 180 ? 1 : 0;
+  const x1o = cx + rOuter * Math.cos(toRad(startDeg));
+  const y1o = cy + rOuter * Math.sin(toRad(startDeg));
+  const x2o = cx + rOuter * Math.cos(toRad(endDeg));
+  const y2o = cy + rOuter * Math.sin(toRad(endDeg));
+  const x2i = cx + rInner * Math.cos(toRad(endDeg));
+  const y2i = cy + rInner * Math.sin(toRad(endDeg));
+  const x1i = cx + rInner * Math.cos(toRad(startDeg));
+  const y1i = cy + rInner * Math.sin(toRad(startDeg));
+  return `M ${x1o} ${y1o} A ${rOuter} ${rOuter} 0 ${large} 1 ${x2o} ${y2o} L ${x2i} ${y2i} A ${rInner} ${rInner} 0 ${large} 0 ${x1i} ${y1i} Z`;
+}
+
+let _pieRenderSeq = 0;
+
 function renderPieSvg(segments, opts = {}) {
   const cx = 50;
   const cy = 50;
-  const r = 42;
-  const hole = 26;
+  const rOuter = 42;
+  const rInner = 28;
+  const gapDeg = opts.gapDeg ?? 3;
+  const uid = opts.gradientId ?? (++_pieRenderSeq);
   let angle = 0;
   const total = segments.reduce((s, seg) => s + Math.max(0, Number(seg.value) || 0), 0) || 1;
   const paths = segments
     .filter((seg) => Number(seg.value) > 0)
     .map((seg) => {
       const val = Number(seg.value) || 0;
-      const start = angle;
-      const end = angle + (val / total) * 360;
-      angle = end;
-      return `<path class="${seg.cls}" d="${pieSlicePath(cx, cy, r, start, end)}"></path>`;
+      const sweep = (val / total) * 360;
+      const start = angle + gapDeg / 2;
+      const end = angle + sweep - gapDeg / 2;
+      angle += sweep;
+      const d = opts.donut
+        ? donutSlicePath(cx, cy, rOuter, rInner, start, end)
+        : pieSlicePath(cx, cy, rOuter, start, end);
+      if (!d) return "";
+      const gradFill = opts.donut
+        ? {
+          "pie-sent": `url(#pieGradSent-${uid})`,
+          "pie-error": `url(#pieGradError-${uid})`,
+          "pie-unsent": `url(#pieGradUnsent-${uid})`,
+        }[seg.cls] || ""
+        : "";
+      const fillAttr = gradFill ? ` fill="${gradFill}"` : "";
+      return `<path class="${seg.cls}"${fillAttr} d="${d}"></path>`;
     })
+    .filter(Boolean)
     .join("");
-  const holeCircle = opts.donut
-    ? `<circle cx="${cx}" cy="${cy}" r="${hole}" class="pie-hole"></circle>`
+
+  const defs = opts.donut ? `
+    <defs>
+      <linearGradient id="pieGradSent-${uid}" x1="18%" y1="12%" x2="88%" y2="92%">
+        <stop offset="0%" stop-color="#ffffff"/>
+        <stop offset="100%" stop-color="#9ca3af"/>
+      </linearGradient>
+      <linearGradient id="pieGradError-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#fca5a5"/>
+        <stop offset="100%" stop-color="#ef4444"/>
+      </linearGradient>
+      <linearGradient id="pieGradUnsent-${uid}" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#525252"/>
+        <stop offset="100%" stop-color="#262626"/>
+      </linearGradient>
+      <filter id="pieGlow-${uid}" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000" flood-opacity="0.35"/>
+      </filter>
+    </defs>` : "";
+
+  const holeCircle = !opts.donut
+    ? `<circle cx="${cx}" cy="${cy}" r="26" class="pie-hole"></circle>`
     : "";
-  const center = opts.center
-    ? `<text x="${cx}" y="${opts.sub ? cy - 1 : cy + 4}" class="pie-center">${escapeHtml(opts.center)}</text>${
-        opts.sub ? `<text x="${cx}" y="${cy + 12}" class="pie-center-sub">${escapeHtml(opts.sub)}</text>` : ""
-      }`
+
+  const centerMain = opts.center
+    ? `<text x="${cx}" y="${opts.sub ? cy - 2 : cy + 1}" class="pie-center">${escapeHtml(String(opts.center))}</text>`
     : "";
-  return `<svg viewBox="0 0 100 100" class="pie-svg" aria-hidden="true">${paths}${holeCircle}${center}</svg>`;
+  const centerSub = opts.sub
+    ? `<text x="${cx}" y="${cy + 11}" class="pie-center-sub">${escapeHtml(String(opts.sub))}</text>`
+    : "";
+
+  return `<svg viewBox="0 0 100 100" class="pie-svg" aria-hidden="true">${defs}<g${opts.donut ? ` filter="url(#pieGlow-${uid})"` : ""}>${paths}</g>${holeCircle}${centerMain}${centerSub}</svg>`;
+}
+
+function renderMessagesPiePanel({ segments, center, sub, metrics }) {
+  const uid = ++_pieRenderSeq;
+  const svg = renderPieSvg(segments, { donut: true, center, sub, gradientId: uid });
+  const metricsHtml = (metrics || []).map((m) => `
+    <div class="msg-pie-metric msg-pie-metric--${escapeHtml(m.kind)}">
+      <div class="msg-pie-metric-track" aria-hidden="true">
+        <div class="msg-pie-metric-fill" style="width:${Math.max(0, Math.min(100, m.pct))}%"></div>
+      </div>
+      <div class="msg-pie-metric-row">
+        <span class="msg-pie-metric-label">${escapeHtml(m.label)}</span>
+        <strong class="msg-pie-metric-value">${escapeHtml(m.value)}</strong>
+      </div>
+      ${m.hint ? `<span class="msg-pie-metric-hint">${escapeHtml(m.hint)}</span>` : ""}
+    </div>`).join("");
+  return `
+    <div class="msg-pie-panel">
+      <div class="msg-pie-ring">${svg}</div>
+      <div class="msg-pie-metrics">${metricsHtml}</div>
+    </div>`;
 }
 
 function pieSegmentsForDisplay(segments) {
@@ -620,26 +762,47 @@ function renderMessagesPie(ov) {
     host.hidden = false;
     if (emptyEl) emptyEl.hidden = true;
     const total = totalSent + errors;
+    const successRate = total > 0 ? Math.round((totalSent / total) * 100) : 100;
     const errPct = total > 0 ? Math.round((errors / total) * 100) : 0;
     if (legend) {
-      legend.textContent = errors > 0
-        ? `${fmtNumber(totalSent)} отправлено · ${fmtNumber(errors)} ${pluralRu(errors, ["ошибка", "ошибки", "ошибок"])} (${errPct}%)`
-        : `отправлено: ${fmtNumber(totalSent)}`;
+      legend.classList.remove("chip-on", "chip-warn");
+      if (total <= 0) legend.textContent = "нет данных";
+      else if (errors > 0) {
+        legend.classList.add("chip-warn");
+        legend.textContent = `${successRate}% успех · ${errPct}% ошибок`;
+      } else {
+        legend.classList.add("chip-on");
+        legend.textContent = `${fmtNumber(totalSent)} отправлено`;
+      }
     }
     const segments = pieSegmentsForDisplay([
       ...(totalSent > 0 ? [{ value: totalSent, cls: "pie-sent" }] : []),
       ...(errors > 0 ? [{ value: errors, cls: "pie-error" }] : []),
     ]);
-    host.innerHTML = `
-      ${renderPieSvg(segments, {
-        donut: true,
-        center: fmtNumber(totalSent),
-        sub: errors > 0 ? `−${fmtNumber(errors)}` : undefined,
-      })}
-      <div class="pie-legend">
-        <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(totalSent)}</b></div>
-        ${errors > 0 ? `<div class="pie-legend-item"><span class="pie-dot error"></span>Ошибки <b>${fmtNumber(errors)}</b></div>` : ""}
-      </div>`;
+    const metrics = [
+      {
+        kind: "sent",
+        label: "Отправлено",
+        value: fmtNumber(totalSent),
+        pct: successRate,
+        hint: total > 0 ? `${successRate}% от всех попыток` : "",
+      },
+    ];
+    if (errors > 0) {
+      metrics.push({
+        kind: "error",
+        label: "Ошибки",
+        value: fmtNumber(errors),
+        pct: errPct,
+        hint: `${errPct}% от всех попыток`,
+      });
+    }
+    host.innerHTML = renderMessagesPiePanel({
+      segments: segments.length ? segments : [{ value: 1, cls: "pie-sent" }],
+      center: total > 0 ? `${successRate}%` : "—",
+      sub: total > 0 ? "успех" : "нет данных",
+      metrics,
+    });
     return;
   }
 
@@ -647,12 +810,19 @@ function renderMessagesPie(ov) {
   if (total <= 0 && errors <= 0) {
     host.hidden = false;
     if (emptyEl) emptyEl.hidden = true;
-    if (legend) legend.textContent = "отправлено: 0";
-    host.innerHTML = `
-      ${renderPieSvg([{ value: 1, cls: "pie-sent" }], { donut: true, center: "0" })}
-      <div class="pie-legend">
-        <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>0</b></div>
-      </div>`;
+    if (legend) {
+      legend.classList.remove("chip-on", "chip-warn");
+      legend.textContent = "отправлено: 0";
+    }
+    host.innerHTML = renderMessagesPiePanel({
+      segments: [{ value: 1, cls: "pie-unsent" }],
+      center: "0",
+      sub: "отправлено",
+      metrics: [
+        { kind: "sent", label: "Отправлено", value: "0", pct: 0 },
+        { kind: "unsent", label: "Не отправлено", value: "0", pct: 100 },
+      ],
+    });
     return;
   }
 
@@ -664,9 +834,14 @@ function renderMessagesPie(ov) {
   const errPct = Math.round((errors / grand) * 100);
   const remPct = Math.max(0, 100 - sentPct - errPct);
   if (legend) {
-    legend.textContent = errors > 0
-      ? `${sentPct}% отправлено · ${errPct}% ошибок · ${remPct}% осталось`
-      : `${sentPct}% отправлено · ${remPct}% осталось`;
+    legend.classList.remove("chip-on", "chip-warn");
+    if (errors > 0) {
+      legend.classList.add("chip-warn");
+      legend.textContent = `${sentPct}% отправлено · ${errPct}% ошибок`;
+    } else {
+      legend.classList.add("chip-on");
+      legend.textContent = `${sentPct}% отправлено · ${remPct}% осталось`;
+    }
   }
 
   const segments = pieSegmentsForDisplay([
@@ -675,17 +850,20 @@ function renderMessagesPie(ov) {
     ...(remaining > 0 ? [{ value: remaining, cls: "pie-unsent" }] : []),
   ]);
 
-  host.innerHTML = `
-    ${renderPieSvg(segments, {
-      donut: true,
-      center: `${sentPct}%`,
-      sub: `${fmtNumber(sent)}/${fmtNumber(total)}`,
-    })}
-    <div class="pie-legend">
-      <div class="pie-legend-item"><span class="pie-dot sent"></span>Отправлено <b>${fmtNumber(sent)}</b></div>
-      ${errors > 0 ? `<div class="pie-legend-item"><span class="pie-dot error"></span>Ошибки <b>${fmtNumber(errors)}</b></div>` : ""}
-      <div class="pie-legend-item"><span class="pie-dot unsent"></span>Не отправлено <b>${fmtNumber(remaining)}</b></div>
-    </div>`;
+  const metrics = [
+    { kind: "sent", label: "Отправлено", value: fmtNumber(sent), pct: sentPct },
+  ];
+  if (errors > 0) {
+    metrics.push({ kind: "error", label: "Ошибки", value: fmtNumber(errors), pct: errPct });
+  }
+  metrics.push({ kind: "unsent", label: "Не отправлено", value: fmtNumber(remaining), pct: remPct });
+
+  host.innerHTML = renderMessagesPiePanel({
+    segments,
+    center: `${sentPct}%`,
+    sub: `${fmtNumber(sent)} / ${fmtNumber(total)}`,
+    metrics,
+  });
 }
 
 // =======================================================
@@ -737,7 +915,7 @@ function mergeActivityPayloads(list) {
 }
 
 async function fetchMergedActivity(days = 14) {
-  await loadBots();
+  if (!STATE.bots.length) await loadBots();
   const payloads = [];
   const bid = STATE.dashboardBotId;
   const bots = bid ? STATE.bots.filter((b) => b.id === bid) : STATE.bots;
@@ -819,7 +997,7 @@ async function refreshActivityHeatmap() {
 }
 
 // =======================================================
-//  Accounts — bulk, swipe, sessions
+//  Accounts — bulk, sessions
 // =======================================================
 function updateBulkBar() {
   const bar = document.getElementById("accountsBulkBar");
@@ -898,59 +1076,6 @@ function renderSessionStatusList() {
         <div style="display:flex;gap:6px;flex-wrap:wrap;">${auth}${spam}</div>
       </div>`;
   }).join("");
-}
-
-function bindAccountSwipeRows() {
-  if (!window.matchMedia("(max-width: 900px)").matches) return;
-  document.querySelectorAll("#accountsBody tr.account-row").forEach((row) => {
-    if (row.dataset.swipeBound) return;
-    row.dataset.swipeBound = "1";
-    const id = row.dataset.id;
-    const bot = row.dataset.bot;
-    const acc = findAccount(id, bot) || { spamRunning: false };
-
-    let actions = row.querySelector(".account-swipe-actions");
-    if (!actions) {
-      actions = document.createElement("div");
-      actions.className = "account-swipe-actions";
-      actions.innerHTML = `
-        <button class="ra ra-${acc.spamRunning ? "stop" : "start"}" data-swipe="spam" title="${acc.spamRunning ? "Стоп" : "Старт"}">
-          ${acc.spamRunning
-            ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
-            : '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"/></svg>'}
-        </button>
-        <button class="ra" data-swipe="settings" title="Настройки">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
-        </button>`;
-      row.appendChild(actions);
-    }
-
-    actions.querySelector('[data-swipe="spam"]')?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      handleRowAction("spam", id, bot);
-      row.classList.remove("swipe-open");
-    });
-    actions.querySelector('[data-swipe="settings"]')?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      handleRowAction("settings", id, bot);
-      row.classList.remove("swipe-open");
-    });
-
-    let startX = 0;
-    let tracking = false;
-    row.addEventListener("touchstart", (e) => {
-      if (e.target.closest("input, button, .ra, label.switch")) return;
-      startX = e.touches[0].clientX;
-      tracking = true;
-    }, { passive: true });
-    row.addEventListener("touchmove", (e) => {
-      if (!tracking) return;
-      const dx = e.touches[0].clientX - startX;
-      if (dx < -40) row.classList.add("swipe-open");
-      if (dx > 40) row.classList.remove("swipe-open");
-    }, { passive: true });
-    row.addEventListener("touchend", () => { tracking = false; });
-  });
 }
 
 function bindSessionManager() {
@@ -1216,7 +1341,6 @@ function renderAccountsTable() {
   if (allCb) {
     allCb.checked = filtered.length > 0 && filtered.every((a) => STATE.selectedAccounts.has(accountKey(a.botId, a.id)));
   }
-  bindAccountSwipeRows();
   updateBulkBar();
 }
 
@@ -1259,6 +1383,7 @@ function openAddSlotModal() {
     toastErr(new Error("Сначала добавь VDS через «Серверы → + VDS»"));
     return;
   }
+  if (!canAddTrialAccount()) return;
   const presetBot = defaultBotId();
   openModal({
     title: "Добавить аккаунт",
@@ -1309,6 +1434,7 @@ function openAddSlotModal() {
       toastErr(new Error("ID слота: первая буква латиница, дальше буквы/цифры/_/-"));
       return;
     }
+    if (!canAddTrialAccount(slotId, botId)) return;
     const body = {
       id: slotId,
       proxy: String(fd.get("proxy") || "").trim() || null,
@@ -1334,9 +1460,10 @@ function openAddSlotModal() {
 async function goToSettingsTab(botId, accountId) {
   STATE.settingsBotId = botId || "";
   STATE.settingsAccountKey = accountId ? chatAccountKey(botId, accountId) : "";
+  STATE.settingsFormDirty = false;
   if (STATE.view !== "settings") switchView("settings", { skipRefresh: true });
   syncSettingsSelects();
-  await loadSettingsForm();
+  await loadSettingsForm({ force: true });
 }
 
 async function goToSourcesTab(botId, accountId, chatId) {
@@ -1495,6 +1622,7 @@ function openUploadSessionModal(presetSlotId, presetFile) {
     return;
   }
   const presetBot = defaultBotId();
+  if (!canAddTrialAccount(presetSlotId, presetBot)) return;
   const fileHint = presetFile
     ? `<div class="callout">Файл: <b>${escapeHtml(presetFile.name)}</b> (${Math.round(presetFile.size / 1024)} KiB)</div>`
     : "";
@@ -1542,6 +1670,7 @@ function openUploadSessionModal(presetSlotId, presetFile) {
       toastErr(new Error("ID слота: первая буква латиница"));
       return;
     }
+    if (!canAddTrialAccount(slotId, botId)) return;
     const file = presetFile || fd.get("sessionFile");
     if (!file || !file.size) { toastErr(new Error("Выбери .session файл")); return; }
     const btn = document.getElementById("modalSubmit");
@@ -1753,11 +1882,9 @@ function renderAllChatsTable() {
       ? "Нет групп — нажми «↻ Telegram» или добавь чат вручную"
       : "Выбери аккаунт в фильтре — так список загрузится быстрее";
     body.innerHTML = `<tr><td colspan="9" class="empty-row">${hint}</td></tr>`;
-    bindChatSwipeRows();
     return;
   }
   body.innerHTML = rows.slice(0, 500).map(allChatRow).join("");
-  bindChatSwipeRows();
 }
 
 async function loadConfiguredChatsForAccounts(accounts) {
@@ -2016,6 +2143,28 @@ function settingsTarget() {
   return { botId: botId || STATE.settingsBotId, accountId };
 }
 
+function isSettingsFormEditing() {
+  if (STATE.settingsFormDirty) return true;
+  const f = document.getElementById("settingsForm");
+  if (!f) return false;
+  const active = document.activeElement;
+  return !!(active && f.contains(active));
+}
+
+function applySettingsFormValues(acc) {
+  const f = document.getElementById("settingsForm");
+  const hint = document.getElementById("settingsSourceHint");
+  if (!f || !acc) return;
+  f.elements.defaultMessage.value = acc.defaultMessage || "";
+  f.elements.proxy.value = acc.rawProxy || "";
+  f.elements.defaultIntervalMin.value = acc.defaultIntervalMin ?? 5;
+  f.elements.defaultIntervalJitter.value = Math.round((acc.defaultIntervalJitter || 0) * 100);
+  f.elements.defaultSourceForward.checked = !!acc.defaultSourceForward;
+  if (hint) {
+    hint.innerHTML = `Общий источник: <b>${escapeHtml(formatSourceLabel(acc.globalSourceChannelId, acc.globalSourceMessageId, acc.defaultSourceForward))}</b> — меняется во вкладке «Источники».`;
+  }
+}
+
 function sourcesTarget() {
   const { botId, accountId } = parseChatAccountKey(STATE.sourcesAccountKey);
   return { botId: botId || STATE.sourcesBotId, accountId };
@@ -2028,26 +2177,22 @@ function formatSourceLabel(channelId, messageId, forward) {
   return `${channelId}${post} (${mode})`;
 }
 
-async function loadSettingsForm() {
+async function loadSettingsForm({ force = false } = {}) {
   const f = document.getElementById("settingsForm");
   const hint = document.getElementById("settingsSourceHint");
   if (!f) return;
   const { botId, accountId } = settingsTarget();
   if (!botId || !accountId) {
+    STATE.settingsFormDirty = false;
     f.reset();
     if (hint) hint.textContent = "Выбери VDS и аккаунт в шапке.";
     return;
   }
+  if (!force && isSettingsFormEditing()) return;
   try {
     const acc = await fetchAccount(accountId, botId);
-    f.elements.defaultMessage.value = acc.defaultMessage || "";
-    f.elements.proxy.value = acc.rawProxy || "";
-    f.elements.defaultIntervalMin.value = acc.defaultIntervalMin ?? 5;
-    f.elements.defaultIntervalJitter.value = Math.round((acc.defaultIntervalJitter || 0) * 100);
-    f.elements.defaultSourceForward.checked = !!acc.defaultSourceForward;
-    if (hint) {
-      hint.innerHTML = `Общий источник: <b>${escapeHtml(formatSourceLabel(acc.globalSourceChannelId, acc.globalSourceMessageId, acc.defaultSourceForward))}</b> — меняется во вкладке «Источники».`;
-    }
+    applySettingsFormValues(acc);
+    STATE.settingsFormDirty = false;
   } catch (e) {
     toastErr(e);
   }
@@ -2068,15 +2213,16 @@ async function saveSettingsForm(ev) {
   };
   try {
     await patchSlot(accountId, body, botId);
+    STATE.settingsFormDirty = false;
     toastOk("Настройки сохранены — интервал применится к следующим отправкам");
-    loadSettingsForm();
+    fetchAllOverviews().catch(() => {});
   } catch (e) { toastErr(e); }
 }
 
-async function refreshSettings() {
+async function refreshSettings(force = false) {
   await fetchAllOverviews();
   syncSettingsSelects();
-  await loadSettingsForm();
+  await loadSettingsForm({ force });
 }
 
 function renderSourcesContextUI() {
@@ -2382,12 +2528,20 @@ function bindSettingsAndSources() {
   document.getElementById("settingsBotSelect")?.addEventListener("change", (e) => {
     STATE.settingsBotId = e.target.value;
     STATE.settingsAccountKey = "";
+    STATE.settingsFormDirty = false;
     syncSettingsSelects();
-    loadSettingsForm();
+    loadSettingsForm({ force: true });
   });
   document.getElementById("settingsAccountSelect")?.addEventListener("change", (e) => {
     STATE.settingsAccountKey = e.target.value;
-    loadSettingsForm();
+    STATE.settingsFormDirty = false;
+    loadSettingsForm({ force: true });
+  });
+  document.getElementById("settingsForm")?.addEventListener("input", () => {
+    STATE.settingsFormDirty = true;
+  });
+  document.getElementById("settingsForm")?.addEventListener("change", () => {
+    STATE.settingsFormDirty = true;
   });
   document.getElementById("settingsForm")?.addEventListener("submit", saveSettingsForm);
   document.getElementById("settingsProxyCheck")?.addEventListener("click", () => {
@@ -2593,56 +2747,6 @@ function bindTable() {
   });
 }
 
-function bindChatSwipeRows() {
-  if (!window.matchMedia("(max-width: 900px)").matches) return;
-  document.querySelectorAll("#allChatsBody tr.chat-row").forEach((row) => {
-    if (row.dataset.swipeBound) return;
-    row.dataset.swipeBound = "1";
-    const { cid, bot, aid } = row.dataset;
-
-    let actions = row.querySelector(".chat-swipe-actions");
-    if (!actions) {
-      actions = document.createElement("div");
-      actions.className = "chat-swipe-actions";
-      actions.innerHTML = `
-        <button class="ra" data-swipe="cfg" title="Настройки">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
-        </button>
-        <button class="ra ra-danger" data-swipe="del" title="Удалить">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
-        </button>`;
-      row.appendChild(actions);
-    }
-
-    actions.querySelector('[data-swipe="cfg"]')?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const chatRow = STATE.allChats.find((r) => r.botId === bot && r.accountId === aid && r.chat.chatId === cid);
-      openChatSettingsModal(bot, aid, cid, chatRow?.chat);
-      row.classList.remove("swipe-open");
-    });
-    actions.querySelector('[data-swipe="del"]')?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      row.querySelector('[data-act="del"]')?.click();
-      row.classList.remove("swipe-open");
-    });
-
-    let startX = 0;
-    let tracking = false;
-    row.addEventListener("touchstart", (e) => {
-      if (e.target.closest("input, button, .ra, label.switch")) return;
-      startX = e.touches[0].clientX;
-      tracking = true;
-    }, { passive: true });
-    row.addEventListener("touchmove", (e) => {
-      if (!tracking) return;
-      const dx = e.touches[0].clientX - startX;
-      if (dx < -40) row.classList.add("swipe-open");
-      if (dx > 40) row.classList.remove("swipe-open");
-    }, { passive: true });
-    row.addEventListener("touchend", () => { tracking = false; });
-  });
-}
-
 function bindChatsBulkActions() {
   document.getElementById("chatsMasterToggle")?.addEventListener("change", (e) => {
     bulkToggleChats(!!e.target.checked);
@@ -2722,9 +2826,39 @@ function spinRefreshBtn() {
   setTimeout(() => btn?.classList.remove("spinning"), 600);
 }
 
+async function loadDashboard({ botId = "" } = {}) {
+  const bid = botId || STATE.dashboardBotId || "";
+  const q = bid ? `?bot=${encodeURIComponent(bid)}` : "";
+  const data = await siteApi("GET", `/api/dashboard${q}`);
+  STATE.bots = data.bots || [];
+  STATE.botsLoadedAt = Date.now();
+  renderBotSelects();
+  const packs = (data.overviews || []).map((o) => {
+    const bot = STATE.bots.find((b) => b.id === o.botId) || {
+      id: o.botId,
+      alias: o.botLabel,
+      host: o.botLabel,
+    };
+    return { bot, overview: o.overview };
+  });
+  STATE.allOverviews = packs;
+  if (bid) return packs[0]?.overview || EMPTY_OVERVIEW;
+  return aggregateOverview(packs);
+}
+
+function renderDashboard(data) {
+  STATE.overview = data || EMPTY_OVERVIEW;
+  renderStats(STATE.overview);
+  renderSidebarStatus(STATE.overview);
+  renderActiveCard(STATE.overview);
+  renderChart(STATE.overview.accounts || []);
+  renderMessagesPie(STATE.overview);
+  updateSyncStamp();
+}
+
 async function refreshAccounts(force = false) {
   try {
-    await fetchAllOverviews();
+    await loadDashboard({ botId: STATE.accountsBotFilter || "" });
     renderAccountsTable();
     renderSessionStatusList();
     updateChatsAccountFilterOptions();
@@ -2737,35 +2871,31 @@ async function refreshAccounts(force = false) {
 async function refreshCurrentView(force = false) {
   if (STATE.view === "accounts") return refreshAccounts(force);
   if (STATE.view === "chats") return refreshChats(force);
-  if (STATE.view === "settings") return refreshSettings();
+  if (STATE.view === "settings") return refreshSettings(force);
   if (STATE.view === "sources") return refreshSources();
   if (STATE.view === "servers") return refreshServers();
   return refresh(force);
 }
 
 async function refresh(force = false) {
-  let data = EMPTY_OVERVIEW;
+  const hadData = !!(STATE.overview?.accounts?.length);
+  if (!force && hadData) renderDashboard(STATE.overview);
+
   try {
-    if (STATE.dashboardBotId) {
-      data = await fetchOverviewForBot(STATE.dashboardBotId);
-    } else {
-      const packs = await fetchAllOverviews();
-      data = aggregateOverview(packs);
+    const data = await loadDashboard({ botId: STATE.dashboardBotId || "" });
+    renderDashboard(data);
+
+    const hasBots = STATE.bots.some((b) => b.hasApiToken !== false && b.status !== "new");
+    const empty = !(data.accounts || []).length;
+    if (hasBots && empty && STATE.dashboardPolls < DASHBOARD_POLL_MAX) {
+      STATE.dashboardPolls += 1;
+      setTimeout(() => refresh(false), 2500);
+    } else if (!empty) {
+      STATE.dashboardPolls = 0;
     }
   } catch (e) {
-    if (force) toastErr(e);
+    if (force || !hadData) toastErr(e);
   }
-  STATE.overview = data;
-  try {
-    renderStats(data);
-    renderSidebarStatus(data);
-    renderActiveCard(data);
-    renderChart(data.accounts || []);
-    renderMessagesPie(data);
-  } catch (e) {
-    console.error("render error:", e);
-  }
-  updateSyncStamp();
   if (force) spinRefreshBtn();
 }
 
@@ -2832,8 +2962,12 @@ function renderExtraBotSelects() {
   syncSourcesSelects();
 }
 
-async function loadBots() {
+async function loadBots({ force = false } = {}) {
+  if (!force && STATE.bots.length && Date.now() - (STATE.botsLoadedAt || 0) < BOTS_REFRESH_MS) {
+    return STATE.bots;
+  }
   STATE.bots = await listBots();
+  STATE.botsLoadedAt = Date.now();
   const ids = new Set(STATE.bots.map((b) => b.id));
   if (STATE.selectedBotId && !ids.has(STATE.selectedBotId)) {
     STATE.selectedBotId = "";
@@ -2895,7 +3029,7 @@ function switchView(name, opts = {}) {
   if (name === "servers") refreshServers();
   else if (name === "accounts") refreshAccounts(true);
   else if (name === "chats") refreshChats(true);
-  else if (name === "settings") refreshSettings();
+  else if (name === "settings") refreshSettings(true);
   else if (name === "sources") refreshSources();
   else if (name === "dashboard") refresh(true);
 }
@@ -2945,12 +3079,37 @@ function fmtRelTime(ts) {
   return d.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
 }
 
+const RESTART_INTERVAL_OPTIONS = [
+  { value: 0, label: "Выкл" },
+  { value: 6, label: "6 ч" },
+  { value: 12, label: "12 ч" },
+  { value: 24, label: "24 ч" },
+  { value: 48, label: "48 ч" },
+];
+
+function fmtRestartInterval(hours) {
+  const h = Number(hours) || 0;
+  if (h <= 0) return "Выкл";
+  const opt = RESTART_INTERVAL_OPTIONS.find((o) => o.value === h);
+  return opt ? opt.label : `${h} ч`;
+}
+
+function restartIntervalSelectHtml(s) {
+  const cur = Number(s.restartIntervalHours);
+  const selected = Number.isFinite(cur) ? cur : 12;
+  const opts = RESTART_INTERVAL_OPTIONS.map((o) =>
+    `<option value="${o.value}"${o.value === selected ? " selected" : ""}>${o.label}</option>`
+  ).join("");
+  const disabled = s.status === "new" ? " disabled" : "";
+  return `<select class="input restart-interval-select" data-srv="restartInterval" data-id="${escapeHtml(s.id)}" title="Авто-перезапуск бота на VDS" style="width:auto; min-width:72px; padding:4px 8px; font-size:12px;"${disabled}>${opts}</select>`;
+}
+
 function renderServersTable() {
   const body = document.getElementById("serversBody");
   const list = STATE.bots;
   document.getElementById("serversCount").textContent = String(list.length);
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="6" class="empty-row">Серверов пока нет — нажми «+ VDS» в шапке</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="empty-row">Серверов пока нет — нажми «+ VDS» в шапке</td></tr>`;
     return;
   }
   body.innerHTML = list.map((s) => {
@@ -2977,6 +3136,7 @@ function renderServersTable() {
           ${s.status !== "new" ? `<div style="margin-top:4px;"><a href="${apiUrl}" target="_blank" class="cell-dim" style="font-size: 11px; text-decoration: underline;">API :${s.apiPort}</a></div>` : ""}
         </td>
         <td data-label="Деплой">${fmtRelTime(s.lastDeployAt)}</td>
+        <td data-label="Авто-перезапуск">${restartIntervalSelectHtml(s)}</td>
         <td data-label="Ключ">${s.hasSshKey ? '<span class="chip on">key</span>' : '<span class="cell-mute">—</span>'}</td>
         <td data-label="Действия" class="td-actions">${serverRowActions(s)}</td>
       </tr>
@@ -2995,6 +3155,7 @@ async function refreshServers() {
 //  Add VDS modal
 // =======================================================
 async function openAddServerModal() {
+  if (!canAddTrialBot()) return;
   openModal({
     title: "Добавить VDS",
     body: `
@@ -3043,16 +3204,37 @@ async function openAddServerModal() {
           </label>
         </div>
 
+        <label class="field">
+          <span class="field-label">Авто-перезапуск бота</span>
+          <select class="input" name="restartIntervalHours">
+            <option value="0">Выкл</option>
+            <option value="6">Каждые 6 часов</option>
+            <option value="12" selected>Каждые 12 часов</option>
+            <option value="24">Каждые 24 часа</option>
+            <option value="48">Каждые 48 часов</option>
+          </select>
+          <span class="field-hint">Systemd-таймер на VDS — перезапускает процесс бота по расписанию</span>
+        </label>
+
         <hr style="border:0; border-top: 1px solid var(--line); margin: 6px 0;" />
 
-        <div class="field-row">
+        <label class="field">
+          <span class="field-label">Клиент Telegram</span>
+          <select class="input" name="telegramClientProfile" id="addServerTelegramProfile">
+            <option value="tdesktop" selected>Telegram Desktop (рекомендуется)</option>
+            <option value="android">Telegram Android</option>
+            <option value="custom">Свой API_ID с my.telegram.org</option>
+          </select>
+        </label>
+
+        <div class="field-row" id="addServerCustomApi" hidden>
           <label class="field">
-            <span class="field-label">API_ID <em>обязательно</em></span>
-            <input class="input mono" name="apiId" required placeholder="12345678" />
+            <span class="field-label">API_ID</span>
+            <input class="input mono" name="apiId" placeholder="12345678" />
           </label>
           <label class="field">
-            <span class="field-label">API_HASH <em>обязательно</em></span>
-            <input class="input mono" name="apiHash" required placeholder="abcdef…" />
+            <span class="field-label">API_HASH</span>
+            <input class="input mono" name="apiHash" placeholder="abcdef…" />
           </label>
         </div>
 
@@ -3070,6 +3252,15 @@ async function openAddServerModal() {
     footer: modalActions("Создать и развернуть"),
   });
 
+  const profileSel = document.getElementById("addServerTelegramProfile");
+  const customApi = document.getElementById("addServerCustomApi");
+  const syncCustomApi = () => {
+    const custom = profileSel?.value === "custom";
+    if (customApi) customApi.hidden = !custom;
+  };
+  profileSel?.addEventListener("change", syncCustomApi);
+  syncCustomApi();
+
   document.getElementById("modalSubmit").addEventListener("click", async () => {
     const f = document.getElementById("addServerForm");
     if (!f.reportValidity()) return;
@@ -3086,12 +3277,20 @@ async function openAddServerModal() {
         sshUser: String(fd.get("sshUser") || "root").trim(),
         installDir: String(fd.get("installDir") || "/opt/userbot").trim(),
         apiPort: Number(fd.get("apiPort") || 8080),
+        restartIntervalHours: Number(fd.get("restartIntervalHours") ?? 12),
       });
     } catch (e) { toastErr(e); return; }
+
+    const profile = String(fd.get("telegramClientProfile") || "tdesktop").trim();
+    if (profile === "custom" && (!String(fd.get("apiId") || "").trim() || !String(fd.get("apiHash") || "").trim())) {
+      toastErr(new Error("Укажите API_ID и API_HASH для профиля custom"));
+      return;
+    }
 
     try {
       await deployBot(server.id, {
         password,
+        telegramClientProfile: profile,
         apiId: String(fd.get("apiId") || "").trim(),
         apiHash: String(fd.get("apiHash") || "").trim(),
         tgBotToken: String(fd.get("tgBotToken") || "").trim(),
@@ -3201,9 +3400,17 @@ async function handleServerAction(act, sid) {
           body: `
             <form class="form-grid" id="redeployForm">
               <div class="callout">При деплое перезаписываются файлы, venv и .env. Sessions и runtime_state на сервере сохраняются.</div>
-              <div class="field-row">
-                <label class="field"><span class="field-label">API_ID</span><input class="input mono" name="apiId" required /></label>
-                <label class="field"><span class="field-label">API_HASH</span><input class="input mono" name="apiHash" required /></label>
+              <label class="field">
+                <span class="field-label">Клиент Telegram</span>
+                <select class="input" name="telegramClientProfile" id="redeployTelegramProfile">
+                  <option value="tdesktop" selected>Telegram Desktop (рекомендуется)</option>
+                  <option value="android">Telegram Android</option>
+                  <option value="custom">Свой API_ID с my.telegram.org</option>
+                </select>
+              </label>
+              <div class="field-row" id="redeployCustomApi" hidden>
+                <label class="field"><span class="field-label">API_ID</span><input class="input mono" name="apiId" /></label>
+                <label class="field"><span class="field-label">API_HASH</span><input class="input mono" name="apiHash" /></label>
               </div>
               <label class="field"><span class="field-label">BOT_TOKEN</span><input class="input mono" name="tgBotToken" /></label>
               <label class="field"><span class="field-label">ADMIN_USER_IDS</span><input class="input mono" name="adminUserIds" /></label>
@@ -3211,6 +3418,14 @@ async function handleServerAction(act, sid) {
           `,
           footer: modalActions("Развернуть"),
         });
+        const redeployProfileSel = document.getElementById("redeployTelegramProfile");
+        const redeployCustomApi = document.getElementById("redeployCustomApi");
+        const syncRedeployCustomApi = () => {
+          const custom = redeployProfileSel?.value === "custom";
+          if (redeployCustomApi) redeployCustomApi.hidden = !custom;
+        };
+        redeployProfileSel?.addEventListener("change", syncRedeployCustomApi);
+        syncRedeployCustomApi();
         const root = document.getElementById("modalRoot");
         const onClose = () => { root.removeEventListener("click", onBackdrop); resolve(null); };
         const onBackdrop = (e) => { if (e.target.closest("[data-modal-close]")) { closeModal(); onClose(); } };
@@ -3219,9 +3434,15 @@ async function handleServerAction(act, sid) {
           const f = document.getElementById("redeployForm");
           if (!f.reportValidity()) return;
           const fd = new FormData(f);
+          const profile = String(fd.get("telegramClientProfile") || "tdesktop").trim();
+          if (profile === "custom" && (!String(fd.get("apiId") || "").trim() || !String(fd.get("apiHash") || "").trim())) {
+            toastErr(new Error("Укажите API_ID и API_HASH для профиля custom"));
+            return;
+          }
           closeModal();
           root.removeEventListener("click", onBackdrop);
           resolve({
+            telegramClientProfile: profile,
             apiId: String(fd.get("apiId") || "").trim(),
             apiHash: String(fd.get("apiHash") || "").trim(),
             tgBotToken: String(fd.get("tgBotToken") || "").trim(),
@@ -3286,6 +3507,26 @@ function bindServersTable() {
     if (!btn || btn.disabled) return;
     handleServerAction(btn.dataset.srv, btn.dataset.id);
   });
+  document.getElementById("serversBody").addEventListener("change", async (e) => {
+    const sel = e.target.closest("select.restart-interval-select[data-srv='restartInterval']");
+    if (!sel || sel.disabled) return;
+    const sid = sel.dataset.id;
+    const hours = Number(sel.value);
+    const prev = STATE.bots.find((b) => b.id === sid)?.restartIntervalHours;
+    try {
+      await patchBot(sid, { restartIntervalHours: hours });
+      const bot = STATE.bots.find((b) => b.id === sid);
+      if (bot) bot.restartIntervalHours = hours;
+      toastOk(`Авто-перезапуск: ${fmtRestartInterval(hours)}`);
+      const s = STATE.bots.find((b) => b.id === sid);
+      if (s?.hasSshKey && s.status !== "new") {
+        openDeployLogModal(sid, `Таймер: ${s.alias || s.host}`);
+      }
+    } catch (err) {
+      if (Number.isFinite(prev)) sel.value = String(prev);
+      toastErr(err);
+    }
+  });
 }
 
 // =======================================================
@@ -3294,7 +3535,6 @@ function bindServersTable() {
 async function init() {
   let meUser = "";
   let meKind = "";
-  let meProfile = null;
   try {
     const me = await siteApi("GET", "/api/auth/me");
     if (!me.user) {
@@ -3315,17 +3555,48 @@ async function init() {
 
   function setSubBanner(active, profile) {
     if (!subBanner) return;
+    const bannerText = document.getElementById("subBannerText");
+    const bannerBtn = document.getElementById("subBannerBtn");
+    subBanner.classList.remove("sub-banner-trial");
+
+    if (active && profile?.isTrial) {
+      subBanner.removeAttribute("hidden");
+      subBanner.classList.add("sub-banner-trial");
+      const sec = profile.planRemainingSec || 0;
+      let rem = "";
+      if (sec > 0 && sec < 86400) {
+        const h = Math.max(1, Math.ceil(sec / 3600));
+        rem = `${h} ${h === 1 ? "час" : h < 5 ? "часа" : "часов"}`;
+      } else if (profile.planDaysLeft > 0) {
+        const d = Math.ceil(profile.planDaysLeft);
+        rem = `${d} ${d === 1 ? "день" : d < 5 ? "дня" : "дней"}`;
+      }
+      if (bannerText) {
+        bannerText.textContent = rem
+          ? `Пробный период (1 сервер, 2 аккаунта) — осталось ${rem}. Оформи тариф, чтобы снять лимиты.`
+          : "Пробный период: 1 сервер и 2 аккаунта. Оформи тариф до окончания триала.";
+      }
+      if (bannerBtn) {
+        bannerBtn.textContent = "Выбрать тариф";
+        bannerBtn.href = "/profile#pfPlansSection";
+      }
+      return;
+    }
+
     if (active) {
       subBanner.setAttribute("hidden", "");
       return;
     }
     subBanner.removeAttribute("hidden");
-    const bannerText = document.getElementById("subBannerText");
     if (bannerText) {
       const exp = profile?.planExpiresAt;
       bannerText.textContent = exp
         ? "Подписка истекла — продли тариф, чтобы пользоваться панелью."
         : "Подписка не активна — оформи тариф, чтобы пользоваться панелью.";
+    }
+    if (bannerBtn) {
+      bannerBtn.textContent = "Оформить подписку";
+      bannerBtn.href = "/profile";
     }
   }
 
@@ -3363,6 +3634,7 @@ async function init() {
       const prof = await siteApi("GET", "/api/users/me");
       if (prof.kind !== "admin") {
         const p = prof.profile;
+        if (p) meProfile = p;
         setSubBanner(!!p?.planActive, p);
         const notes = prof.notifications || [];
         notes.forEach((n) => {
@@ -3399,13 +3671,13 @@ async function init() {
   document.getElementById("addServerBtn")?.addEventListener("click", openAddServerModal);
 
   try {
-    await loadBots();
+    switchView("dashboard", { skipRefresh: true });
+    STATE.dashboardPolls = 0;
+    await refresh(true);
   } catch (e) {
     toastErr(e);
   }
 
-  switchView("dashboard", { skipRefresh: true });
-  await refresh(true);
   STATE.pollTimer = setInterval(() => {
     if (STATE.view === "dashboard") refresh();
     else if (STATE.view === "accounts") refreshAccounts();
@@ -3413,7 +3685,7 @@ async function init() {
     else if (STATE.view === "settings") refreshSettings();
     else if (STATE.view === "sources") refreshSources();
     else if (STATE.view === "servers") refreshServers();
-  }, 5000);
+  }, 8000);
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -112,8 +112,10 @@ chmod 700 "${DATA_DIR}" 2>/dev/null || true
 
 cp "${INSTALL_ROOT}/deploy/site/exsender.service" /etc/systemd/system/exsender.service
 cp "${INSTALL_ROOT}/deploy/site/nginx-exsender.conf" /etc/nginx/sites-available/exsender
+cp "${INSTALL_ROOT}/deploy/site/nginx-inviter.conf" /etc/nginx/sites-available/inviter
 
 ln -sf /etc/nginx/sites-available/exsender /etc/nginx/sites-enabled/exsender
+ln -sf /etc/nginx/sites-available/inviter /etc/nginx/sites-enabled/inviter
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
@@ -131,6 +133,12 @@ else
   echo "www.${DOMAIN} has no DNS — certificate for apex only."
   certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" --redirect || CERT_FAIL=1
 fi
+if getent ahosts "inviter.${DOMAIN}" >/dev/null 2>&1; then
+  certbot --nginx -d "inviter.${DOMAIN}" --non-interactive --agree-tos -m "${CERTBOT_EMAIL}" --redirect || true
+else
+  echo "inviter.${DOMAIN} has no DNS — skip inviter cert (add A record later)."
+fi
+
 if [[ "${CERT_FAIL}" == "1" ]]; then
   echo "certbot failed — check DNS A for ${DOMAIN}, then run:"
   echo "  certbot --nginx -d ${DOMAIN}"

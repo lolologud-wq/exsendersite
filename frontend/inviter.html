@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <title>exsender · Inviter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/profile.css" />
+  <link rel="stylesheet" href="css/admin.css" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+</head>
+<body class="pf-body adm-body">
+
+<header class="pf-topbar">
+  <div class="pf-container pf-topbar-inner">
+    <a href="/" class="pf-brand">
+      <span class="logo-mark">e</span>
+      <span>exsender inviter</span>
+    </a>
+    <nav class="pf-topnav">
+      <a href="/inviter" class="active">Inviter</a>
+      <a href="/admin">Админ</a>
+      <a href="/app">Панель</a>
+    </nav>
+    <div class="pf-top-actions">
+      <span class="pf-user" id="invUser">—</span>
+      <button class="btn-ghost" id="invLogoutBtn">Выйти</button>
+    </div>
+  </div>
+</header>
+
+<main class="pf-main">
+  <div class="pf-container adm-container">
+    <div class="adm-head">
+      <div>
+        <div class="pf-eyebrow">EX Inviter</div>
+        <h1 class="adm-title">Парс и инвайт</h1>
+      </div>
+      <button class="btn-ghost" id="invRefreshBtn">↻ Обновить</button>
+    </div>
+
+    <section class="adm-alert" id="invAlert" hidden></section>
+    <section class="adm-alert adm-alert-ok" id="invOk" hidden></section>
+
+    <section class="pf-section adm-tools">
+      <h2 class="pf-h2">Бот и аккаунт</h2>
+      <div class="adm-form">
+        <select class="input" id="invBotSelect"><option value="">— выбери VDS бота —</option></select>
+        <select class="input" id="invAccountSelect"><option value="">— слот аккаунта —</option></select>
+      </div>
+      <div class="adm-mini-stats" id="invOverview">Выбери бота и слот</div>
+    </section>
+
+    <section class="pf-section adm-tools">
+      <h2 class="pf-h2">Парс источника</h2>
+      <div class="adm-form">
+        <input class="input" id="invSourceRef" placeholder="@chat или https://t.me/chat" />
+        <label class="adm-check"><input type="checkbox" id="invParseForce" /> Парсить повторно</label>
+        <button class="btn-primary" id="invParseBtn">Парсить</button>
+      </div>
+    </section>
+
+    <section class="pf-section adm-tools">
+      <h2 class="pf-h2">Target чат</h2>
+      <div class="adm-form">
+        <input class="input" id="invTargetRef" placeholder="@target или ссылка" />
+        <button class="btn-primary" id="invTargetBtn">Сохранить target</button>
+      </div>
+      <div class="adm-form">
+        <select class="input" id="invDialogSelect"><option value="">— из списка чатов —</option></select>
+        <button class="btn-ghost" id="invDialogsBtn">Обновить чаты</button>
+      </div>
+    </section>
+
+    <section class="pf-section adm-tools">
+      <h2 class="pf-h2">Запуск</h2>
+      <div class="adm-form">
+        <input class="input" id="invLimit" type="number" min="0" placeholder="limit (0 = все)" />
+        <input class="input" id="invDelay" type="number" min="0" step="0.1" value="3" placeholder="delay сек" />
+        <button class="btn-primary" id="invRunBtn">Запуск</button>
+        <button class="btn-ghost" id="invStopBtn">Стоп</button>
+      </div>
+      <pre class="adm-log" id="invJobLog">job: idle</pre>
+    </section>
+  </div>
+</main>
+
+<script src="js/http.js"></script>
+<script src="js/inviter.js"></script>
+</body>
+</html>

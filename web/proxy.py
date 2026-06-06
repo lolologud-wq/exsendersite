@@ -25,10 +25,29 @@ DEPLOY_KEY = WEB_DIR / "deploy_key"
 
 DEFAULT_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 DIRECT_TIMEOUT = httpx.Timeout(6.0, connect=3.0)
-HEALTH_TIMEOUT = httpx.Timeout(12.0, connect=6.0)
-HEALTH_CACHE_TTL = 12.0
+HEALTH_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
+OVERVIEW_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+HEALTH_OK_CACHE_TTL = 30.0
+HEALTH_FAIL_CACHE_TTL = 8.0
+OVERVIEW_CACHE_TTL = 6.0
 
 _health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def health_cache_ttl(result: dict[str, Any]) -> float:
+    return HEALTH_OK_CACHE_TTL if result.get("reachable") else HEALTH_FAIL_CACHE_TTL
+
+
+def cached_health(rec_id: str) -> dict[str, Any] | None:
+    """Return cached health if still fresh, else None."""
+    cached = _health_cache.get(rec_id)
+    if not cached:
+        return None
+    ts, result = cached
+    if time.time() - ts < health_cache_ttl(result):
+        return result
+    return None
 
 
 def _headers(rec: BotRecord, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -112,7 +131,7 @@ class _TunnelPool:
             username=rec.ssh_user,
             client_keys=[str(DEPLOY_KEY)],
             known_hosts=None,
-            connect_timeout=20,
+            connect_timeout=12,
             keepalive_interval=30,
             keepalive_count_max=4,
         )
@@ -249,10 +268,9 @@ async def get_json(rec: BotRecord, path: str, **kw: Any) -> tuple[int, dict | li
 
 
 async def healthcheck(rec: BotRecord) -> dict:
-    now = time.time()
-    cached = _health_cache.get(rec.id)
-    if cached and now - cached[0] < HEALTH_CACHE_TTL:
-        return cached[1]
+    fresh = cached_health(rec.id)
+    if fresh is not None:
+        return fresh
 
     try:
         r = await bot_request(rec, "GET", "/health", timeout=HEALTH_TIMEOUT)
@@ -260,5 +278,88 @@ async def healthcheck(rec: BotRecord) -> dict:
     except Exception as e:
         result = {"reachable": False, "error": str(e)}
 
-    _health_cache[rec.id] = (now, result)
+    _health_cache[rec.id] = (time.time(), result)
     return result
+
+
+async def refresh_health_background(bots: list[BotRecord]) -> None:
+    if not bots:
+        return
+    await asyncio.gather(*(warm_bot(b) for b in bots), return_exceptions=True)
+
+
+async def warm_bot(rec: BotRecord) -> None:
+    await healthcheck(rec)
+    try:
+        await fetch_overview(rec)
+    except Exception as e:
+        logger.debug("warm overview %s: %s", rec.id, e)
+
+
+async def fetch_overview(rec: BotRecord, *, force: bool = False) -> dict[str, Any]:
+    now = time.time()
+    if not force:
+        cached = _overview_cache.get(rec.id)
+        if cached and now - cached[0] < OVERVIEW_CACHE_TTL:
+            return cached[1]
+        try:
+            from overview_cache import get as get_overview_cache
+
+            disk = get_overview_cache(rec.id, max_age_sec=86400)
+            if disk is not None:
+                _overview_cache[rec.id] = (now, disk)
+                return disk
+        except Exception:
+            pass
+
+    status, data = await get_json(rec, "overview", timeout=OVERVIEW_TIMEOUT)
+    if status != 200 or not isinstance(data, dict):
+        raise RuntimeError(f"overview HTTP {status}")
+
+    _overview_cache[rec.id] = (now, data)
+    try:
+        from overview_cache import put as put_overview_cache
+
+        put_overview_cache(rec.id, data)
+    except Exception:
+        pass
+    return data
+
+
+async def fetch_overview_pack(rec: BotRecord) -> dict[str, Any]:
+    try:
+        data = await fetch_overview(rec)
+        return {"botId": rec.id, "ok": True, "overview": data}
+    except Exception as e:
+        return {"botId": rec.id, "ok": False, "error": str(e)}
+
+
+async def refresh_overviews_live(bots: list[BotRecord], *, force: bool = True) -> None:
+    if not bots:
+        return
+    await asyncio.gather(
+        *(fetch_overview(b, force=force) for b in bots),
+        return_exceptions=True,
+    )
+
+
+def invalidate_overview_cache(bot_id: str) -> None:
+    _overview_cache.pop(bot_id, None)
+
+
+def apply_health_to_item(item: dict[str, Any], rec: BotRecord) -> bool:
+    """Fill reachable from cache; return True if background refresh is needed."""
+    cached = _health_cache.get(rec.id)
+    fresh = cached_health(rec.id)
+    if fresh is not None:
+        item["reachable"] = bool(fresh.get("reachable"))
+        if fresh.get("error"):
+            item["lastError"] = str(fresh["error"])[:200]
+        return False
+    if cached:
+        item["reachable"] = bool(cached[1].get("reachable"))
+        if cached[1].get("error"):
+            item["lastError"] = str(cached[1]["error"])[:200]
+    else:
+        item["reachable"] = True
+    return True

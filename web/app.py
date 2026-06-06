@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,11 @@ from fastapi.staticfiles import StaticFiles
 import deployer
 import admin_ops
 import payments
+import referrals
+import changelog as changelog_mod
+import overview_cache
 import security
+import trial_limits
 from auth import (
     admin_logins,
     clear_cookie,
@@ -41,9 +46,19 @@ from auth import (
     require_subscription,
     verify_admin,
 )
-from proxy import bot_request, get_json, healthcheck, request
-from registry import BotRegistry
-from users import PLANS, UserStore, plan_duration_seconds, plan_info
+from proxy import (
+    OVERVIEW_TIMEOUT,
+    apply_health_to_item,
+    bot_request,
+    fetch_overview,
+    fetch_overview_pack,
+    get_json,
+    refresh_health_background,
+    refresh_overviews_live,
+    request,
+)
+from registry import BotRecord, BotRegistry
+from users import PLANS, TRIAL_DAYS, UserStore, plan_duration_seconds, plan_info
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +71,8 @@ invoices = payments.InvoiceStore()
 audit = admin_ops.AuditStore()
 promos = admin_ops.PromoStore()
 notifications = admin_ops.NotificationStore()
+referral_ledger = referrals.ReferralLedger()
+changelog_store = changelog_mod.ChangelogStore()
 
 
 def _panel_access(request: Request) -> dict[str, Any]:
@@ -102,11 +119,30 @@ def _require_bot(request: Request, bid: str):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="exsender", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+    @app.middleware("http")
+    async def inviter_subdomain_redirect(request: Request, call_next):
+        host = (request.headers.get("host") or "").split(":")[0].lower()
+        if host == "inviter.exsender.top" and request.url.path == "/":
+            return RedirectResponse("/inviter", status_code=302)
+        return await call_next(request)
+
     app.add_middleware(security.SecurityMiddleware)
 
     @app.on_event("startup")
     async def _security_startup() -> None:
         security.startup_security_check()
+
+    @app.on_event("startup")
+    async def _warm_overview_cache() -> None:
+        async def _run() -> None:
+            bots = [
+                b for b in registry.list()
+                if b.api_token and b.status not in ("new",)
+            ]
+            if bots:
+                await refresh_overviews_live(bots, force=False)
+
+        asyncio.create_task(_run())
 
     def _admin_guard(request: Request) -> str:
         return require_admin(request, users)
@@ -134,6 +170,15 @@ def create_app() -> FastAPI:
         if ident["kind"] == "anon":
             return RedirectResponse("/login", status_code=303)
         return FileResponse(FRONTEND_DIR / "profile.html")
+
+    @app.get("/changelog", include_in_schema=False)
+    async def changelog_page(request: Request):
+        return FileResponse(FRONTEND_DIR / "changelog.html")
+
+    @app.get("/api/changelog", include_in_schema=False)
+    async def api_changelog():
+        items = [e.public() for e in changelog_store.list_public()]
+        return {"items": items}
 
     @app.get("/api/auth/csrf", include_in_schema=False)
     async def auth_csrf(request: Request, response: Response):
@@ -221,7 +266,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=str(e)) from e
         issue_user_cookie(response, rec.id, request)
         security.issue_csrf_token(response, request)
-        return {"ok": True, "redirect": "/profile", "user": rec.public()}
+        return {"ok": True, "redirect": "/app", "user": rec.public()}
 
     # ===================================================== profile / billing
     @app.get("/api/users/me", dependencies=[Depends(require_login)])
@@ -230,6 +275,7 @@ def create_app() -> FastAPI:
         plans_list = [
             {"id": pid, **p, "priceUsd": p["price_usd"]}
             for pid, p in PLANS.items()
+            if pid != "trial"
         ]
         if ident["kind"] == "user":
             rec = ident["record"]
@@ -241,18 +287,40 @@ def create_app() -> FastAPI:
                     "status": i.status,
                     "createdAt": i.created_at,
                     "paidAt": i.paid_at,
+                    "referralCreditUsd": i.referral_credit_usd,
                 }
                 for i in invoices.user_history(rec.id)
             ]
             history.sort(key=lambda x: x["createdAt"], reverse=True)
+            paid_ids = referrals.paid_user_ids_from_invoices(invoices)
+            ref_stats = referrals.referral_stats(
+                users, rec.id, paid_user_ids=paid_ids
+            )
+            ref_history = [
+                e.public() for e in referral_ledger.for_referrer(rec.id)
+            ]
+            usage = await trial_limits.trial_usage(rec, registry)
+            profile = rec.public()
+            if usage:
+                profile = {**profile, "trialLimits": usage}
             return {
                 "kind": "user",
-                "profile": rec.public(),
+                "profile": profile,
                 "plans": plans_list,
                 "history": history[:20],
                 "cryptoBotConfigured": payments.crypto_bot_configured(),
-                "notifications": notifications.for_user(rec.id),
+                "notifications": notifications.for_user(
+                    rec.id, user_created_at=rec.created_at
+                ),
                 "referralLink": f"/register?ref={rec.referral_code}",
+                "referral": {
+                    "commissionPct": referrals.REFERRAL_COMMISSION_PCT,
+                    "bonusDaysFirstPay": referrals.REFERRAL_BONUS_DAYS,
+                    "invited": ref_stats["invited"],
+                    "paid": ref_stats["paid"],
+                    "history": ref_history,
+                },
+                "trialDays": TRIAL_DAYS,
             }
         return {
             "kind": "admin",
@@ -379,6 +447,64 @@ def create_app() -> FastAPI:
         )
         return {"ok": True, "profile": users.get(user_id).admin_view()}
 
+    @app.delete("/api/admin/users/{user_id}")
+    async def admin_delete_user(user_id: str, request: Request):
+        user_id = security.validate_safe_id(user_id, name="user_id")
+        admin_login = _admin_guard(request)
+        rec = users.get(user_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        email = rec.email
+        bots_removed = registry.remove_for_owner(user_id)
+        notifications.remove_for_user(user_id)
+        users.delete(user_id)
+        audit.add(
+            admin_login,
+            "delete_user",
+            target=email,
+            details={"botsRemoved": len(bots_removed)},
+        )
+        return {"ok": True, "email": email, "botsRemoved": bots_removed}
+
+    @app.post("/api/admin/users/{user_id}/referral-balance")
+    async def admin_grant_referral_balance(
+        user_id: str, payload: dict[str, Any], request: Request
+    ):
+        user_id = security.validate_safe_id(user_id, name="user_id")
+        admin_login = _admin_guard(request)
+        body = payload or {}
+        try:
+            amount = float(body.get("amountUsd", body.get("amount_usd", 0)) or 0)
+        except (TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail="Некорректная сумма") from e
+        note = str(body.get("note", "")).strip()[:200]
+        rec = users.get(user_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        try:
+            referrals.admin_grant_referral_credit(
+                user_id,
+                amount,
+                users,
+                referral_ledger,
+                admin_login=admin_login,
+                note=note,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        rec = users.get(user_id)
+        audit.add(
+            admin_login,
+            "grant_referral_balance",
+            target=rec.email,
+            details={
+                "amountUsd": round(amount, 2),
+                "note": note,
+                "balanceUsd": round(float(rec.referral_balance_usd or 0), 2),
+            },
+        )
+        return {"ok": True, "profile": rec.admin_view()}
+
     @app.get("/api/admin/revenue-chart")
     async def admin_revenue_chart(request: Request, days: int = 30):
         _admin_guard(request)
@@ -445,13 +571,17 @@ def create_app() -> FastAPI:
         title = str(body.get("title", "exsender")).strip() or "exsender"
         raw_ids = body.get("userIds", body.get("user_ids"))
         user_ids: list[str] | None = None
+        broadcast_user_ids: list[str] | None = None
         if raw_ids and raw_ids != "all":
             user_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
+        else:
+            broadcast_user_ids = [u.id for u in users.list_users()]
         try:
             count = notifications.send(
                 message=message,
                 title=title,
                 user_ids=user_ids,
+                broadcast_user_ids=broadcast_user_ids,
                 admin=admin_login,
             )
         except ValueError as e:
@@ -459,17 +589,66 @@ def create_app() -> FastAPI:
         audit.add(
             admin_login,
             "notify",
-            target="all" if not user_ids else f"{len(user_ids)} users",
+            target="all" if broadcast_user_ids is not None else f"{len(user_ids or [])} users",
             details={"title": title, "message": message[:200]},
         )
         return {"ok": True, "sent": count}
+
+    @app.delete("/api/admin/notify")
+    async def admin_notify_clear(request: Request):
+        admin_login = _admin_guard(request)
+        removed = notifications.clear_all()
+        audit.add(admin_login, "notify_clear", target="all", details={"removed": removed})
+        return {"ok": True, "removed": removed}
+
+    @app.get("/api/admin/changelog")
+    async def admin_changelog_list(request: Request):
+        _admin_guard(request)
+        return {
+            "items": [e.public() for e in changelog_store.list_all()],
+        }
+
+    @app.post("/api/admin/changelog")
+    async def admin_changelog_create(payload: dict[str, Any], request: Request):
+        admin_login = _admin_guard(request)
+        body = payload or {}
+        tags_raw = body.get("tags", [])
+        tags: list[str] = []
+        if isinstance(tags_raw, str):
+            tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        elif isinstance(tags_raw, list):
+            tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+        try:
+            entry = changelog_store.create(
+                version=str(body.get("version", "")).strip(),
+                title=str(body.get("title", "")).strip(),
+                date=str(body.get("date", "")).strip(),
+                body=str(body.get("body", "")).strip(),
+                tags=tags,
+                published=bool(body.get("published", True)),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        audit.add(
+            admin_login,
+            "changelog_create",
+            target=entry.version,
+            details={"title": entry.title},
+        )
+        return {"ok": True, "entry": entry.public()}
 
     @app.get("/api/users/notifications", dependencies=[Depends(require_login)])
     async def user_notifications(request: Request):
         uid = current_user_id(request)
         if not uid:
             return {"notifications": []}
-        return {"notifications": notifications.for_user(uid)}
+        rec = users.get(uid)
+        created_at = float(rec.created_at) if rec else 0.0
+        return {
+            "notifications": notifications.for_user(
+                uid, user_created_at=created_at
+            )
+        }
 
     @app.post("/api/users/notifications/{nid}/read", dependencies=[Depends(require_login)])
     async def user_notification_read(nid: str, request: Request):
@@ -513,21 +692,60 @@ def create_app() -> FastAPI:
         plan_id = str((payload or {}).get("plan", "")).strip()
         promo_code = str((payload or {}).get("promo", (payload or {}).get("promoCode", ""))).strip().upper()
         info = plan_info(plan_id)
-        if not info:
+        if not info or plan_id == "trial":
             raise HTTPException(status_code=400, detail="Неизвестный тариф")
-        if not payments.crypto_bot_configured():
-            raise HTTPException(
-                status_code=503,
-                detail="Платежи временно недоступны (CRYPTO_BOT_TOKEN не задан)",
-            )
         base_usd = float(info["price_usd"])
         amount_usd = base_usd
-        promo_rec = None
         if promo_code:
             promo_rec, err = promos.validate(promo_code)
             if promo_rec is None:
                 raise HTTPException(status_code=400, detail=err)
             amount_usd = admin_ops.apply_promo_price(base_usd, promo_rec)
+        referral_credit = 0.0
+        use_ref_balance = bool(
+            (payload or {}).get("useReferralBalance", (payload or {}).get("use_referral_balance"))
+        )
+        if use_ref_balance and rec.referral_balance_usd > 0:
+            referral_credit = round(
+                min(float(rec.referral_balance_usd), amount_usd),
+                2,
+            )
+            amount_usd = round(amount_usd - referral_credit, 2)
+
+        if amount_usd <= 0 and referral_credit > 0:
+            inv_id = f"refbal-{secrets.token_hex(8)}"
+            inv = payments.InvoiceRecord(
+                invoice_id=inv_id,
+                user_id=rec.id,
+                plan=plan_id,
+                amount_usd=0.0,
+                base_amount_usd=base_usd,
+                promo_code=promo_code,
+                referral_credit_usd=referral_credit,
+            )
+            invoices.add(inv)
+            _activate_paid_invoice(inv)
+            rec = users.get(uid)
+            return {
+                "ok": True,
+                "paid": True,
+                "paidByReferral": True,
+                "invoiceId": inv_id,
+                "payUrl": None,
+                "amountUsd": 0.0,
+                "baseUsd": base_usd,
+                "promo": promo_code or None,
+                "plan": plan_id,
+                "referralCreditUsd": referral_credit,
+                "referralBalanceUsd": round(float(rec.referral_balance_usd or 0), 2) if rec else 0.0,
+                "profile": rec.public() if rec else None,
+            }
+
+        if not payments.crypto_bot_configured():
+            raise HTTPException(
+                status_code=503,
+                detail="Платежи временно недоступны (CRYPTO_BOT_TOKEN не задан)",
+            )
         if amount_usd < 0.01:
             amount_usd = 0.01
         try:
@@ -547,6 +765,7 @@ def create_app() -> FastAPI:
             amount_usd=amount_usd,
             base_amount_usd=base_usd,
             promo_code=promo_code,
+            referral_credit_usd=referral_credit,
             asset=str(result.get("asset") or result.get("accepted_assets") or ""),
             pay_url=str(result.get("pay_url") or result.get("bot_invoice_url") or ""),
         )
@@ -561,6 +780,8 @@ def create_app() -> FastAPI:
             "baseUsd": base_usd,
             "promo": promo_code or None,
             "plan": plan_id,
+            "referralCreditUsd": referral_credit,
+            "referralBalanceUsd": round(float(rec.referral_balance_usd or 0), 2),
         }
 
     @app.get("/api/payments/check/{invoice_id}", dependencies=[Depends(require_login)])
@@ -571,18 +792,19 @@ def create_app() -> FastAPI:
         if local is None or (uid and local.user_id != uid):
             raise HTTPException(status_code=404, detail="invoice not found")
         if local.status != "paid":
-            try:
-                rows = await payments.get_invoices([invoice_id])
-            except payments.CryptoBotError:
-                rows = []
-            for row in rows:
-                if str(row.get("invoice_id")) != invoice_id:
-                    continue
-                status = str(row.get("status") or "").lower()
-                if status == "paid":
-                    _activate_paid_invoice(local)
-                elif status in ("expired", "active"):
-                    local.status = status
+            if not str(invoice_id).startswith("refbal-"):
+                try:
+                    rows = await payments.get_invoices([invoice_id])
+                except payments.CryptoBotError:
+                    rows = []
+                for row in rows:
+                    if str(row.get("invoice_id")) != invoice_id:
+                        continue
+                    status = str(row.get("status") or "").lower()
+                    if status == "paid":
+                        _activate_paid_invoice(local)
+                    elif status in ("expired", "active"):
+                        local.status = status
         rec = users.get(local.user_id) if local else None
         return {
             "ok": True,
@@ -615,19 +837,21 @@ def create_app() -> FastAPI:
                         invoice_id=f"promo-{inv.promo_code}",
                     )
         invoices.mark_paid(inv.invoice_id)
-        # Referral bonus on first payment
-        if paid_before == 0:
-            buyer = users.get(inv.user_id)
-            if buyer and buyer.referred_by:
-                referrer = users.get(buyer.referred_by)
-                if referrer is not None:
-                    bonus = admin_ops.REFERRAL_BONUS_DAYS
-                    users.extend_plan_days(
-                        referrer.id,
-                        referrer.plan or "week",
-                        bonus,
-                        invoice_id=f"ref-{buyer.id}",
-                    )
+        if inv.referral_credit_usd > 0:
+            try:
+                users.spend_referral_credit(inv.user_id, inv.referral_credit_usd)
+            except ValueError:
+                logger.warning(
+                    "referral credit spend failed user=%s inv=%s",
+                    inv.user_id,
+                    inv.invoice_id,
+                )
+        referrals.apply_referral_rewards(
+            inv,
+            users,
+            referral_ledger,
+            is_first_payment=(paid_before == 0),
+        )
 
     @app.post("/api/payments/webhook")
     async def crypto_bot_webhook(request: Request):
@@ -657,15 +881,63 @@ def create_app() -> FastAPI:
         ident = _panel_access(request)
         bots = _bots_visible(ident)
         items = [b.public() for b in bots]
-        results = await asyncio.gather(
-            *(healthcheck(b) for b in bots), return_exceptions=True
-        )
-        for it, res in zip(items, results):
-            if isinstance(res, dict):
-                it["reachable"] = bool(res.get("reachable"))
-            else:
-                it["reachable"] = False
+        stale: list[BotRecord] = []
+        for it, b in zip(items, bots):
+            if apply_health_to_item(it, b):
+                stale.append(b)
+        if stale:
+            asyncio.create_task(refresh_health_background(stale))
         return {"bots": items}
+
+    @app.get("/api/dashboard", dependencies=[Depends(require_login)])
+    async def dashboard(request: Request, bot: str = ""):
+        """Instant dashboard from disk cache; live refresh runs in background."""
+        ident = _panel_access(request)
+        bots = _bots_visible(ident)
+        items = [b.public() for b in bots]
+        stale: list[BotRecord] = []
+        for it, b in zip(items, bots):
+            if apply_health_to_item(it, b):
+                stale.append(b)
+        if stale:
+            asyncio.create_task(refresh_health_background(stale))
+
+        active = [b for b in bots if b.api_token and b.status != "new"]
+        if bot.strip():
+            active = [b for b in active if b.id == bot.strip()]
+
+        overviews: list[dict[str, Any]] = []
+        pending: list[BotRecord] = []
+        is_stale = False
+        for b in active:
+            snap = overview_cache.get(b.id)
+            if snap is not None:
+                age = overview_cache.age_sec(b.id)
+                if age is None or age > 25:
+                    is_stale = True
+                overviews.append({
+                    "botId": b.id,
+                    "botLabel": b.alias or b.host,
+                    "overview": snap,
+                })
+            else:
+                pending.append(b)
+                is_stale = True
+
+        # Instant response from disk cache; refresh stale/missing in background.
+        to_refresh: list[BotRecord] = []
+        for b in active:
+            snap = overview_cache.get(b.id)
+            if snap is None:
+                to_refresh.append(b)
+            else:
+                age = overview_cache.age_sec(b.id)
+                if age is None or age > 25:
+                    to_refresh.append(b)
+        if to_refresh:
+            asyncio.create_task(refresh_overviews_live(to_refresh, force=bool(pending)))
+
+        return {"bots": items, "overviews": overviews, "stale": is_stale}
 
     @app.post("/api/bots", status_code=201)
     async def add_bot(payload: dict[str, Any], request: Request):
@@ -675,6 +947,9 @@ def create_app() -> FastAPI:
         if not host:
             raise HTTPException(status_code=400, detail="host обязателен")
         owner_id = "" if _panel_is_admin(ident) else _panel_user_id(ident)
+        if owner_id:
+            user_rec = users.get(owner_id)
+            trial_limits.enforce_trial_bot_limit(user_rec, registry)
         rec = registry.add(
             host=host,
             ssh_port=int(body.get("sshPort", body.get("ssh_port", 22))),
@@ -683,6 +958,17 @@ def create_app() -> FastAPI:
             install_dir=str(body.get("installDir", body.get("install_dir", "/opt/userbot"))),
             api_port=int(body.get("apiPort", body.get("api_port", 8080))),
             api_token=str(body.get("apiToken", body.get("api_token", ""))),
+            restart_interval_hours=max(
+                0,
+                min(
+                    int(
+                        body["restartIntervalHours"]
+                        if "restartIntervalHours" in body
+                        else body.get("restart_interval_hours", 12)
+                    ),
+                    168,
+                ),
+            ),
             owner_id=owner_id,
         )
         return rec.public()
@@ -700,11 +986,26 @@ def create_app() -> FastAPI:
             "apiPort": "api_port",
             "apiToken": "api_token",
             "status": "status",
+            "restartIntervalHours": "restart_interval_hours",
         }
         patch = {allowed[k]: v for k, v in (payload or {}).items() if k in allowed}
+        if "restart_interval_hours" in patch:
+            try:
+                h = int(patch["restart_interval_hours"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="restartIntervalHours должно быть числом")
+            patch["restart_interval_hours"] = max(0, min(h, 168))
+        prev_hours = rec.restart_interval_hours
         rec = registry.update(bid, **patch)
         if rec is None:
             raise HTTPException(status_code=404, detail="not found")
+        if (
+            "restart_interval_hours" in patch
+            and patch["restart_interval_hours"] != prev_hours
+            and rec.has_ssh_key
+            and rec.status not in ("new",)
+        ):
+            _start_bg(deployer.sync_restart_timer_remote(bid, registry))
         return rec.public()
 
     @app.delete("/api/bots/{bid}")
@@ -724,26 +1025,42 @@ def create_app() -> FastAPI:
         bid = rec.id
         body = payload or {}
         password = body.get("sshPassword") or body.get("password") or None
+        profile = str(
+            body.get("telegramClientProfile")
+            or body.get("TELEGRAM_CLIENT_PROFILE")
+            or "tdesktop"
+        ).strip().lower()
+        if profile not in ("tdesktop", "android", "custom"):
+            profile = "tdesktop"
         env = {
+            "TELEGRAM_CLIENT_PROFILE": profile,
+            "TELEGRAM_DEVICE_PROFILE": str(
+                body.get("telegramDeviceProfile")
+                or body.get("TELEGRAM_DEVICE_PROFILE")
+                or "tdesktop"
+            ).strip().lower(),
             "API_ID": str(body.get("apiId", body.get("API_ID", ""))).strip(),
             "API_HASH": str(body.get("apiHash", body.get("API_HASH", ""))).strip(),
             "TG_BOT_TOKEN": str(body.get("tgBotToken", body.get("TG_BOT_TOKEN", ""))).strip(),
             "ADMIN_USER_IDS": str(body.get("adminUserIds", body.get("ADMIN_USER_IDS", ""))).strip(),
         }
-        if (not env["API_ID"] or not env["API_HASH"]) and rec.has_ssh_key and rec.status != "new":
+        if rec.has_ssh_key and rec.status != "new":
             try:
                 remote = await deployer.read_remote_env(rec, password=password)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"API_ID/API_HASH не заданы и не удалось прочитать .env с VDS: {e}",
-                ) from e
-            env["API_ID"] = env["API_ID"] or remote.get("API_ID", "")
-            env["API_HASH"] = env["API_HASH"] or remote.get("API_HASH", "")
-            env["TG_BOT_TOKEN"] = env["TG_BOT_TOKEN"] or remote.get("BOT_TOKEN", remote.get("TG_BOT_TOKEN", ""))
-            env["ADMIN_USER_IDS"] = env["ADMIN_USER_IDS"] or remote.get("ADMIN_USER_IDS", "")
-        if not env["API_ID"] or not env["API_HASH"]:
-            raise HTTPException(status_code=400, detail="API_ID и API_HASH обязательны")
+            except Exception:
+                remote = {}
+            env = deployer._merge_remote_env(env, remote)
+            if not env["API_ID"] or not env["API_HASH"]:
+                env["API_ID"] = env["API_ID"] or remote.get("API_ID", "")
+                env["API_HASH"] = env["API_HASH"] or remote.get("API_HASH", "")
+        if env["API_ID"] and env["API_HASH"]:
+            env["TELEGRAM_CLIENT_PROFILE"] = "custom"
+            profile = "custom"
+        elif profile == "custom" and (not env["API_ID"] or not env["API_HASH"]):
+            raise HTTPException(
+                status_code=400,
+                detail="API_ID и API_HASH обязательны при профиле custom (my.telegram.org)",
+            )
         _start_bg(deployer.deploy(bid, registry, password=password, env=env))
         return {"ok": True, "operation": "deploy"}
 
@@ -781,8 +1098,15 @@ def create_app() -> FastAPI:
     PROXY_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 
     async def _proxy(bid: str, method: str, sub: str, request: Request) -> Response:
-        _, rec = _require_bot(request, bid)
+        ident, rec = _require_bot(request, bid)
         bid = rec.id
+        if ident.get("kind") == "user" and method.upper() == "POST":
+            sub_norm = sub.strip("/")
+            user_rec = ident["record"]
+            if sub_norm == "accounts":
+                await trial_limits.enforce_trial_account_limit(
+                    user_rec, registry, bot=rec
+                )
         if not rec.api_token:
             raise HTTPException(status_code=400, detail="у бота нет API токена — заверши deploy")
 
@@ -826,11 +1150,9 @@ def create_app() -> FastAPI:
         if not rec.api_token:
             return {"reachable": False, "error": "no api token"}
         try:
-            status, data = await get_json(rec, "overview")
+            data = await fetch_overview(rec)
         except Exception as e:
             return {"reachable": False, "error": str(e)}
-        if status != 200:
-            return {"reachable": False, "status": status, "body": data}
         return {"reachable": True, "data": data}
 
     # ===================================================== session upload via site
@@ -842,9 +1164,16 @@ def create_app() -> FastAPI:
         proxy_str: str = Form("", alias="proxy"),
         session_file: UploadFile = File(...),
     ):
-        _, rec = _require_bot(request, bid)
+        ident, rec = _require_bot(request, bid)
         bid = rec.id
         slot_id = security.validate_safe_id(slot_id, name="slot_id")
+        if ident.get("kind") == "user":
+            await trial_limits.enforce_trial_account_limit(
+                ident["record"],
+                registry,
+                bot=rec,
+                slot_id=slot_id,
+            )
         if not rec.api_token:
             raise HTTPException(status_code=404, detail="bot not found or not deployed")
         data = await session_file.read()
@@ -862,6 +1191,87 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=r.status_code, content=r.json())
         except ValueError:
             return Response(status_code=r.status_code, content=r.content)
+
+    @app.get("/inviter", include_in_schema=False)
+    async def inviter_page(request: Request):
+        ident = current_identity(request, users)
+        if ident["kind"] != "admin":
+            return RedirectResponse("/login", status_code=303)
+        return FileResponse(FRONTEND_DIR / "inviter.html")
+
+    @app.get("/api/inviter/bots")
+    async def inviter_list_bots(request: Request):
+        _admin_guard(request)
+        bots = registry.list()
+        items = [b.public() for b in bots]
+        stale: list[BotRecord] = []
+        for it, b in zip(items, bots):
+            if apply_health_to_item(it, b):
+                stale.append(b)
+        if stale:
+            asyncio.create_task(refresh_health_background(stale))
+        return {"bots": items}
+
+    INVITER_PROXY_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+    async def _proxy_inviter(bid: str, method: str, sub: str, request: Request) -> Response:
+        _admin_guard(request)
+        bid = security.validate_safe_id(bid, name="bot_id")
+        rec = registry.get(bid)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="not found")
+        if not rec.api_token:
+            raise HTTPException(status_code=400, detail="у бота нет API токена")
+
+        body = await request.body()
+        ct = request.headers.get("content-type", "")
+        extra: dict[str, str] = {}
+        if ct:
+            extra["Content-Type"] = ct
+        path = sub.lstrip("/")
+        if not path.startswith("inviter/"):
+            path = "inviter/" + path
+        try:
+            r = await bot_request(
+                rec,
+                method,
+                path,
+                content=body if body else None,
+                extra_headers=extra or None,
+                params=dict(request.query_params),
+                timeout=INVITER_PROXY_TIMEOUT,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        resp_headers = {
+            k: v for k, v in r.headers.items()
+            if k.lower() not in ("content-encoding", "transfer-encoding", "connection")
+        }
+        return Response(content=r.content, status_code=r.status_code, headers=resp_headers)
+
+    @app.get("/api/inviter/bots/{bid}/accounts")
+    async def inviter_bot_accounts(bid: str, request: Request):
+        _admin_guard(request)
+        bid = security.validate_safe_id(bid, name="bot_id")
+        rec = registry.get(bid)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="not found")
+        if not rec.api_token:
+            raise HTTPException(status_code=400, detail="у бота нет API токена")
+        try:
+            status, data = await get_json(rec, "overview")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        if status != 200 or not isinstance(data, dict):
+            raise HTTPException(status_code=502, detail="bot overview failed")
+        return {"accounts": data.get("accounts") or []}
+
+    @app.api_route(
+        "/api/inviter/bots/{bid}/{path:path}",
+        methods=["GET", "POST", "PATCH", "DELETE", "PUT"],
+    )
+    async def inviter_proxy(bid: str, path: str, request: Request):
+        return await _proxy_inviter(bid, request.method, path, request)
 
     # ===================================================== static frontend
     @app.get("/", include_in_schema=False)

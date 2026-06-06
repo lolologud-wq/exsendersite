@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from bot_service import BotService, ServiceError
+from inviter.service import InviterService
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,11 @@ def resolve_token() -> str:
     return new_token
 
 
-def build_app(service: BotService, token: str) -> FastAPI:
+def build_app(
+    service: BotService,
+    token: str,
+    inviter_service: InviterService | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Userbot — local API",
         version="1.0.0",
@@ -264,14 +269,88 @@ def build_app(service: BotService, token: str) -> FastAPI:
     async def proxy_check(payload: dict[str, Any]) -> dict[str, Any]:
         return await service.check_proxy(str((payload or {}).get("proxy", "")))
 
+
+    # -------------------------------------------------------------- inviter
+    inv = inviter_service
+
+    @app.get("/api/local/inviter/overview", dependencies=[Depends(require_token)])
+    async def inviter_overview(accountId: str = "") -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return await inv.overview(accountId)
+
+    @app.get(
+        "/api/local/inviter/accounts/{aid}/dialogs",
+        dependencies=[Depends(require_token)],
+    )
+    async def inviter_dialogs(aid: str) -> list[dict[str, Any]]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return await inv.list_dialogs(aid)
+
+    @app.post("/api/local/inviter/parse", dependencies=[Depends(require_token)])
+    async def inviter_parse(payload: dict[str, Any]) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        return await inv.parse(
+            str(body.get("accountId", body.get("account_id", ""))),
+            str(body.get("sourceRef", body.get("source_ref", ""))),
+            force=bool(body.get("force", False)),
+        )
+
+    @app.post("/api/local/inviter/target", dependencies=[Depends(require_token)])
+    async def inviter_target(payload: dict[str, Any]) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        return await inv.set_target(
+            str(body.get("accountId", body.get("account_id", ""))),
+            str(body.get("targetRef", body.get("target_ref", ""))),
+        )
+
+    @app.get("/api/local/inviter/queue", dependencies=[Depends(require_token)])
+    async def inviter_queue(accountId: str = "", limit: int = 0) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return inv.get_queue(accountId, limit=limit)
+
+    @app.post("/api/local/inviter/run", dependencies=[Depends(require_token)])
+    async def inviter_run(payload: dict[str, Any]) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        limit = int(body.get("limit", 0) or 0)
+        delay = float(body.get("delay", 3.0) or 3.0)
+        return await inv.start_job(
+            str(body.get("accountId", body.get("account_id", ""))),
+            limit=limit,
+            delay=delay,
+        )
+
+    @app.post("/api/local/inviter/stop", dependencies=[Depends(require_token)])
+    async def inviter_stop() -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return inv.stop_job()
+
+    @app.get("/api/local/inviter/job", dependencies=[Depends(require_token)])
+    async def inviter_job() -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return inv.get_job()
+
     return app
 
 
-async def serve_bot_api(service: BotService) -> None:
+async def serve_bot_api(
+    service: BotService,
+    inviter_service: InviterService | None = None,
+) -> None:
     host = os.getenv("BOT_API_HOST", "0.0.0.0")
     port = int(os.getenv("BOT_API_PORT", "8080"))
     token = resolve_token()
-    app = build_app(service, token)
+    app = build_app(service, token, inviter_service)
     config = uvicorn.Config(
         app,
         host=host,
