@@ -52,6 +52,7 @@ class BotRecord:
     has_ssh_key: bool = False
     restart_interval_hours: int = 12
     owner_id: str = ""
+    suite: str = "sender"  # sender | inviter
 
     def public(self) -> dict[str, Any]:
         d = asdict(self)
@@ -73,6 +74,7 @@ class BotRecord:
             "lastError": d["last_error"],
             "hasSshKey": d["has_ssh_key"],
             "restartIntervalHours": max(0, int(d["restart_interval_hours"])),
+            "suite": (d.get("suite") or "sender").strip().lower() or "sender",
         }
 
 
@@ -171,6 +173,7 @@ class BotRegistry:
         api_token: str = "",
         restart_interval_hours: int = 12,
         owner_id: str = "",
+        suite: str = "sender",
     ) -> BotRecord:
         bid = uuid.uuid4().hex[:12]
         rec = BotRecord(
@@ -190,6 +193,7 @@ class BotRegistry:
                 ),
             ),
             owner_id=(owner_id or "").strip(),
+            suite=(suite or "sender").strip().lower() or "sender",
         )
         self._cache[bid] = rec
         self._save()

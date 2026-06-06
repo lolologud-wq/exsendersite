@@ -67,6 +67,12 @@ def init_db(db_path: Path | None = None) -> Path:
             )
             """
         )
+        try:
+            conn.execute(
+                "ALTER TABLE invite_queue ADD COLUMN access_hash INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -117,14 +123,19 @@ def add_users_to_queue(
     account_id: str,
     source_chat_id: str,
     source_chat_title: str,
-    users: list[tuple[int, str, str]],
+    users: list[tuple[int, str, str] | tuple[int, str, str, int]],
 ) -> tuple[int, int, int]:
     conn = sqlite3.connect(db_path)
     try:
         inserted = 0
         duplicated = 0
         blocked = 0
-        for tg_user_id, username, display_name in users:
+        for item in users:
+            if len(item) >= 4:
+                tg_user_id, username, display_name, access_hash = item[0], item[1], item[2], int(item[3] or 0)
+            else:
+                tg_user_id, username, display_name = item[0], item[1], item[2]
+                access_hash = 0
             blocked_row = conn.execute(
                 """
                 SELECT reason FROM invite_blocklist
@@ -138,9 +149,16 @@ def add_users_to_queue(
                 continue
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO invite_queue
-                (account_id, source_chat_id, source_chat_title, tg_user_id, username, display_name, added_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO invite_queue
+                (account_id, source_chat_id, source_chat_title, tg_user_id, username, display_name, access_hash, added_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, tg_user_id) DO UPDATE SET
+                    username = excluded.username,
+                    display_name = excluded.display_name,
+                    access_hash = CASE
+                        WHEN excluded.access_hash != 0 THEN excluded.access_hash
+                        ELSE invite_queue.access_hash
+                    END
                 """,
                 (
                     account_id,
@@ -149,6 +167,7 @@ def add_users_to_queue(
                     tg_user_id,
                     username,
                     display_name,
+                    access_hash,
                     _utc_now(),
                 ),
             )
@@ -167,7 +186,7 @@ def get_queue(db_path: Path, account_id: str, limit: int = 0) -> list[dict[str, 
     conn.row_factory = sqlite3.Row
     try:
         query = """
-            SELECT id, tg_user_id, username, display_name, source_chat_title
+            SELECT id, tg_user_id, username, display_name, source_chat_title, access_hash
             FROM invite_queue
             WHERE account_id = ?
             ORDER BY id ASC
@@ -179,6 +198,67 @@ def get_queue(db_path: Path, account_id: str, limit: int = 0) -> list[dict[str, 
         else:
             params = (account_id,)
         return [dict(r) for r in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def queue_needs_hash_backfill(db_path: Path, account_id: str) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT 1 FROM invite_queue
+            WHERE account_id = ? AND COALESCE(access_hash, 0) = 0
+            LIMIT 1
+            """,
+            (account_id,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_queue_source_chats(db_path: Path, account_id: str) -> list[dict[str, Any]]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT source_chat_id, source_chat_title
+            FROM invite_queue
+            WHERE account_id = ?
+            """,
+            (account_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def bulk_update_access_hashes(
+    db_path: Path,
+    account_id: str,
+    uid_to_hash: dict[int, int],
+) -> int:
+    if not uid_to_hash:
+        return 0
+    conn = sqlite3.connect(db_path)
+    updated = 0
+    try:
+        for uid, access_hash in uid_to_hash.items():
+            if not access_hash:
+                continue
+            cur = conn.execute(
+                """
+                UPDATE invite_queue
+                SET access_hash = ?
+                WHERE account_id = ? AND tg_user_id = ?
+                """,
+                (int(access_hash), account_id, int(uid)),
+            )
+            updated += cur.rowcount
+        conn.commit()
+        return updated
     finally:
         conn.close()
 
@@ -223,6 +303,18 @@ def mark_blocked_user(
             (account_id, tg_user_id, reason, _utc_now()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_blocked_user_ids(db_path: Path, account_id: str) -> set[int]:
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tg_user_id FROM invite_blocklist WHERE account_id = ?",
+            (account_id,),
+        ).fetchall()
+        return {int(r[0]) for r in rows}
     finally:
         conn.close()
 

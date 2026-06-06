@@ -58,7 +58,14 @@ from proxy import (
     request,
 )
 from registry import BotRecord, BotRegistry
-from users import PLANS, TRIAL_DAYS, UserStore, plan_duration_seconds, plan_info
+from register_verify import PendingRegistrationStore
+from users import PLANS, TRIAL_DAYS, UserStore, hash_password, plan_duration_seconds, plan_info
+from verify_bot import (
+    VERIFY_BOT_TOKEN,
+    bot_deep_link,
+    resolve_bot_username,
+    start_verify_bot_background,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +80,22 @@ promos = admin_ops.PromoStore()
 notifications = admin_ops.NotificationStore()
 referral_ledger = referrals.ReferralLedger()
 changelog_store = changelog_mod.ChangelogStore()
+pending_regs = PendingRegistrationStore()
+
+INVITER_HOSTS = frozenset(
+    h.strip().lower()
+    for h in os.getenv("INVITER_HOSTS", "inviter.exsender.top").split(",")
+    if h.strip()
+)
+SITE_PUBLIC_BASE = os.getenv("SITE_PUBLIC_URL", "https://exsender.top").rstrip("/")
+
+
+def _request_host(request: Request) -> str:
+    return (request.headers.get("host") or "").split(":")[0].lower()
+
+
+def _is_inviter_host(request: Request) -> bool:
+    return _request_host(request) in INVITER_HOSTS
 
 
 def _panel_access(request: Request) -> dict[str, Any]:
@@ -105,8 +128,56 @@ def _bots_visible(ident: dict[str, Any]) -> list:
     return registry.list_for(_panel_user_id(ident))
 
 
+def _bot_suite(rec: BotRecord) -> str:
+    return (getattr(rec, "suite", None) or "sender").strip().lower() or "sender"
+
+
+def _bots_sender(ident: dict[str, Any]) -> list:
+    return [b for b in _bots_visible(ident) if _bot_suite(b) != "inviter"]
+
+
+def _bots_inviter(ident: dict[str, Any]) -> list:
+    return _bots_visible(ident)
+
+
 def _require_bot(request: Request, bid: str):
     ident = _panel_access(request)
+    bid = security.validate_safe_id(bid, name="bot_id")
+    if _panel_is_admin(ident):
+        rec = registry.get(bid)
+    else:
+        rec = registry.get_for(bid, _panel_user_id(ident))
+    if rec is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if _bot_suite(rec) == "inviter":
+        raise HTTPException(status_code=404, detail="not found")
+    return ident, rec
+
+
+def _require_inviter_bot(bid: str) -> BotRecord:
+    """Any registered bot — inviter may proxy exsender VDS and accounts."""
+    bid = security.validate_safe_id(bid, name="bot_id")
+    rec = registry.get(bid)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="not found")
+    return rec
+
+
+def _require_inviter_owned_bot(bid: str) -> BotRecord:
+    """Inviter-suite bots only — CRUD, deploy, uninstall."""
+    rec = _require_inviter_bot(bid)
+    if _bot_suite(rec) != "inviter":
+        raise HTTPException(status_code=404, detail="not found")
+    return rec
+
+
+def _inviter_access(request: Request) -> dict[str, Any]:
+    """Logged-in customer with active plan, or admin."""
+    return _panel_access(request)
+
+
+def _require_inviter_bot_access(request: Request, bid: str) -> tuple[dict[str, Any], BotRecord]:
+    ident = _inviter_access(request)
     bid = security.validate_safe_id(bid, name="bot_id")
     if _panel_is_admin(ident):
         rec = registry.get(bid)
@@ -117,13 +188,34 @@ def _require_bot(request: Request, bid: str):
     return ident, rec
 
 
+def _require_inviter_owned_bot_access(request: Request, bid: str) -> tuple[dict[str, Any], BotRecord]:
+    ident, rec = _require_inviter_bot_access(request, bid)
+    if _bot_suite(rec) != "inviter":
+        raise HTTPException(status_code=404, detail="not found")
+    return ident, rec
+
+
+def _login_redirect(request: Request, kind: str) -> str:
+    if _is_inviter_host(request):
+        return "/inviter"
+    return "/admin" if kind == "admin" else "/app"
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="exsender", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
     @app.middleware("http")
     async def inviter_subdomain_redirect(request: Request, call_next):
-        host = (request.headers.get("host") or "").split(":")[0].lower()
-        if host == "inviter.exsender.top" and request.url.path == "/":
+        if not _is_inviter_host(request):
+            return await call_next(request)
+        path = request.url.path
+        if path == "/":
             return RedirectResponse("/inviter", status_code=302)
+        static_ok = path.startswith(("/api/", "/css/", "/js/", "/img/", "/og/"))
+        inviter_ok = path in ("/inviter", "/login")
+        if static_ok or inviter_ok:
+            return await call_next(request)
+        if path in ("/app", "/admin", "/profile", "/register", "/changelog"):
+            return RedirectResponse(f"{SITE_PUBLIC_BASE}{path}", status_code=302)
         return await call_next(request)
 
     app.add_middleware(security.SecurityMiddleware)
@@ -131,6 +223,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _security_startup() -> None:
         security.startup_security_check()
+
+    @app.on_event("startup")
+    async def _start_verify_bot() -> None:
+        start_verify_bot_background(pending_regs, users.telegram_taken)
 
     @app.on_event("startup")
     async def _warm_overview_cache() -> None:
@@ -152,9 +248,9 @@ def create_app() -> FastAPI:
     async def login_page(request: Request):
         ident = current_identity(request, users)
         if ident["kind"] == "admin":
-            return RedirectResponse("/admin", status_code=303)
+            return RedirectResponse(_login_redirect(request, "admin"), status_code=303)
         if ident["kind"] == "user":
-            return RedirectResponse("/app", status_code=303)
+            return RedirectResponse(_login_redirect(request, "user"), status_code=303)
         return FileResponse(FRONTEND_DIR / "login.html")
 
     @app.get("/register", include_in_schema=False)
@@ -208,7 +304,7 @@ def create_app() -> FastAPI:
             security.record_auth_success(ip)
             issue_admin_cookie(response, admin_login, request)
             security.issue_csrf_token(response, request)
-            return {"ok": True, "kind": "admin", "redirect": "/admin"}
+            return {"ok": True, "kind": "admin", "redirect": _login_redirect(request, "admin")}
 
         blocked_rec = users.by_email(login_)
         if blocked_rec is not None and blocked_rec.blocked:
@@ -224,7 +320,7 @@ def create_app() -> FastAPI:
         users.touch_login(rec.id)
         issue_user_cookie(response, rec.id, request)
         security.issue_csrf_token(response, request)
-        return {"ok": True, "kind": "user", "redirect": "/app"}
+        return {"ok": True, "kind": "user", "redirect": _login_redirect(request, "user")}
 
     @app.post("/api/auth/logout")
     async def logout(request: Request, response: Response):
@@ -234,17 +330,36 @@ def create_app() -> FastAPI:
 
     @app.get("/api/auth/me")
     async def me(request: Request, response: Response):
-        security.issue_csrf_token(response, request)
+        csrf = security.issue_csrf_token(response, request)
         ident = current_identity(request, users)
         if ident["kind"] == "admin":
-            return {"user": ident["user"], "kind": "admin"}
+            return {"user": ident["user"], "kind": "admin", "csrf": csrf}
         if ident["kind"] == "user":
             rec = ident["record"]
-            return {"user": rec.email, "kind": "user", "profile": rec.public()}
-        return {"user": None}
+            return {"user": rec.email, "kind": "user", "profile": rec.public(), "csrf": csrf}
+        return {"user": None, "csrf": csrf}
+
+    def _resolve_referrer_id(body: dict[str, Any]) -> str:
+        ref_code = str(body.get("ref", body.get("referral", ""))).strip().upper()[:32]
+        if not ref_code:
+            return ""
+        referrer = users.by_referral_code(ref_code)
+        return referrer.id if referrer is not None else ""
 
     @app.post("/api/auth/register")
-    async def register(payload: dict[str, Any], request: Request, response: Response):
+    async def register_legacy():
+        raise HTTPException(
+            status_code=400,
+            detail="Подтвердите аккаунт через Telegram. Обновите страницу регистрации.",
+        )
+
+    @app.post("/api/auth/register/start")
+    async def register_start(payload: dict[str, Any], request: Request):
+        if not VERIFY_BOT_TOKEN:
+            raise HTTPException(
+                status_code=503,
+                detail="Подтверждение через Telegram временно недоступно",
+            )
         body = payload or {}
         ip = security.client_ip(request)
         if security.honeypot_triggered(body):
@@ -253,20 +368,90 @@ def create_app() -> FastAPI:
 
         email = security.validate_email(str(body.get("email", body.get("contact", ""))))
         password = security.validate_password(str(body.get("password", "")))
+        if users.by_email(email):
+            raise HTTPException(
+                status_code=409,
+                detail="Аккаунт с такой почтой уже зарегистрирован",
+            )
         name = str(body.get("name", "")).strip()[:80]
-        referred_by = ""
-        ref_code = str(body.get("ref", body.get("referral", ""))).strip().upper()[:32]
-        if ref_code:
-            referrer = users.by_referral_code(ref_code)
-            if referrer is not None:
-                referred_by = referrer.id
+        referred_by = _resolve_referrer_id(body)
+        pending = pending_regs.create(
+            email=email,
+            password_hash=hash_password(password),
+            name=name,
+            referred_by=referred_by,
+            ip=ip,
+        )
+        bot_username = ""
+        async with httpx.AsyncClient() as client:
+            bot_username = await resolve_bot_username(client)
+        bot_url = bot_deep_link(pending.token, bot_username)
+        if not bot_url:
+            raise HTTPException(
+                status_code=503,
+                detail="Бот подтверждения не настроен (VERIFY_BOT_USERNAME)",
+            )
+        return {
+            "ok": True,
+            "token": pending.token,
+            "botUrl": bot_url,
+            "expiresAt": pending.expires_at,
+        }
+
+    @app.get("/api/auth/register/status")
+    async def register_status(token: str = ""):
+        rec = pending_regs.get(token)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        return {"ok": True, **rec.public_status()}
+
+    @app.post("/api/auth/register/complete")
+    async def register_complete(
+        payload: dict[str, Any], request: Request, response: Response
+    ):
+        body = payload or {}
+        token = str(body.get("token", "")).strip()
+        rec = pending_regs.get(token)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        if rec.completed:
+            raise HTTPException(status_code=409, detail="Регистрация уже завершена")
+        if rec.is_expired():
+            raise HTTPException(
+                status_code=410,
+                detail="Время подтверждения истекло. Начните регистрацию заново.",
+            )
+        if not rec.is_verified():
+            raise HTTPException(
+                status_code=400,
+                detail="Сначала подтвердите аккаунт в Telegram",
+            )
+        if users.by_email(rec.email):
+            pending_regs.mark_completed(token)
+            raise HTTPException(
+                status_code=409,
+                detail="Аккаунт с такой почтой уже зарегистрирован",
+            )
+        if users.telegram_taken(rec.telegram_user_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Этот Telegram уже привязан к другому аккаунту",
+            )
         try:
-            rec = users.create(email=email, password=password, name=name, referred_by=referred_by)
+            user_rec = users.create_with_hash(
+                rec.email,
+                rec.password_hash,
+                rec.name,
+                referred_by=rec.referred_by,
+                telegram_user_id=rec.telegram_user_id,
+                telegram_username=rec.telegram_username,
+            )
         except ValueError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
-        issue_user_cookie(response, rec.id, request)
+        pending_regs.mark_completed(token)
+        issue_user_cookie(response, user_rec.id, request)
         security.issue_csrf_token(response, request)
-        return {"ok": True, "redirect": "/app", "user": rec.public()}
+        return {"ok": True, "redirect": "/app", "user": user_rec.public()}
 
     # ===================================================== profile / billing
     @app.get("/api/users/me", dependencies=[Depends(require_login)])
@@ -374,7 +559,7 @@ def create_app() -> FastAPI:
                 }
                 for i in recent_payments
             ],
-            "recentUsers": [u.admin_view() for u in recent_users],
+            "recentUsers": [],
             "revenueChart": admin_ops.revenue_by_day(paid, days=30),
             "promos": [p.public() for p in promos.list_all()],
             "auditLog": [
@@ -397,16 +582,31 @@ def create_app() -> FastAPI:
             return RedirectResponse("/login", status_code=303)
         return FileResponse(FRONTEND_DIR / "admin.html")
 
+    async def _enrich_admin_users(user_records: list) -> list[dict[str, Any]]:
+        async def _one(rec) -> dict[str, Any]:
+            view = rec.admin_view()
+            usage = await trial_limits.owner_usage_stats(registry, rec.id)
+            view["botsUsed"] = usage["botsUsed"]
+            view["accountsUsed"] = usage["accountsUsed"]
+            return view
+
+        if not user_records:
+            return []
+        return list(await asyncio.gather(*[_one(u) for u in user_records]))
+
     @app.get("/api/admin/stats")
     async def admin_stats(request: Request):
         _admin_guard(request)
-        return _admin_stats_payload()
+        payload = _admin_stats_payload()
+        recent_users = sorted(users.list_users(), key=lambda u: u.created_at, reverse=True)[:25]
+        payload["recentUsers"] = await _enrich_admin_users(recent_users)
+        return payload
 
     @app.get("/api/admin/users")
     async def admin_list_users(request: Request):
         _admin_guard(request)
         all_users = sorted(users.list_users(), key=lambda u: u.created_at, reverse=True)
-        return {"users": [u.admin_view() for u in all_users]}
+        return {"users": await _enrich_admin_users(all_users)}
 
     @app.post("/api/admin/users/{user_id}/plan")
     async def admin_grant_plan(user_id: str, payload: dict[str, Any], request: Request):
@@ -879,7 +1079,7 @@ def create_app() -> FastAPI:
     @app.get("/api/bots", dependencies=[Depends(require_login)])
     async def list_bots(request: Request):
         ident = _panel_access(request)
-        bots = _bots_visible(ident)
+        bots = _bots_sender(ident)
         items = [b.public() for b in bots]
         stale: list[BotRecord] = []
         for it, b in zip(items, bots):
@@ -893,7 +1093,7 @@ def create_app() -> FastAPI:
     async def dashboard(request: Request, bot: str = ""):
         """Instant dashboard from disk cache; live refresh runs in background."""
         ident = _panel_access(request)
-        bots = _bots_visible(ident)
+        bots = _bots_sender(ident)
         items = [b.public() for b in bots]
         stale: list[BotRecord] = []
         for it, b in zip(items, bots):
@@ -950,6 +1150,9 @@ def create_app() -> FastAPI:
         if owner_id:
             user_rec = users.get(owner_id)
             trial_limits.enforce_trial_bot_limit(user_rec, registry)
+        suite_raw = str(body.get("suite", "sender")).strip().lower() or "sender"
+        if suite_raw == "inviter":
+            raise HTTPException(status_code=400, detail="используй /api/inviter/bots для inviter VDS")
         rec = registry.add(
             host=host,
             ssh_port=int(body.get("sshPort", body.get("ssh_port", 22))),
@@ -970,6 +1173,7 @@ def create_app() -> FastAPI:
                 ),
             ),
             owner_id=owner_id,
+            suite="sender",
         )
         return rec.public()
 
@@ -1108,6 +1312,8 @@ def create_app() -> FastAPI:
             return PROXY_AUTH_TIMEOUT
         if "/chats" in norm or "/spam" in norm:
             return PROXY_CHATS_TIMEOUT
+        if "/resolve_post" in norm:
+            return httpx.Timeout(55.0, connect=12.0)
         return PROXY_TIMEOUT
 
     async def _proxy(bid: str, method: str, sub: str, request: Request) -> Response:
@@ -1207,15 +1413,49 @@ def create_app() -> FastAPI:
 
     @app.get("/inviter", include_in_schema=False)
     async def inviter_page(request: Request):
+        if not _is_inviter_host(request):
+            return RedirectResponse("https://inviter.exsender.top", status_code=302)
         ident = current_identity(request, users)
-        if ident["kind"] != "admin":
-            return RedirectResponse("/login", status_code=303)
+        if ident["kind"] == "anon":
+            return RedirectResponse("/login?next=/inviter", status_code=303)
+        if ident["kind"] == "user":
+            rec = ident["record"]
+            if rec.blocked:
+                return RedirectResponse(f"{SITE_PUBLIC_BASE}/login", status_code=303)
+            if rec.plan_expires_at <= time.time():
+                return RedirectResponse(f"{SITE_PUBLIC_BASE}/profile", status_code=303)
         return FileResponse(FRONTEND_DIR / "inviter.html")
+
+    INVITER_PROXY_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+    def _inviter_deploy_env(body: dict[str, Any]) -> dict[str, str]:
+        profile = str(
+            body.get("telegramClientProfile")
+            or body.get("TELEGRAM_CLIENT_PROFILE")
+            or "tdesktop"
+        ).strip().lower()
+        if profile not in ("tdesktop", "android", "custom"):
+            profile = "tdesktop"
+        env = {
+            "TELEGRAM_CLIENT_PROFILE": profile,
+            "TELEGRAM_DEVICE_PROFILE": str(
+                body.get("telegramDeviceProfile")
+                or body.get("TELEGRAM_DEVICE_PROFILE")
+                or "tdesktop"
+            ).strip().lower(),
+            "API_ID": str(body.get("apiId", body.get("API_ID", ""))).strip(),
+            "API_HASH": str(body.get("apiHash", body.get("API_HASH", ""))).strip(),
+            "TG_BOT_TOKEN": str(body.get("tgBotToken", body.get("TG_BOT_TOKEN", ""))).strip(),
+            "ADMIN_USER_IDS": str(body.get("adminUserIds", body.get("ADMIN_USER_IDS", ""))).strip(),
+        }
+        if env["API_ID"] and env["API_HASH"]:
+            env["TELEGRAM_CLIENT_PROFILE"] = "custom"
+        return env
 
     @app.get("/api/inviter/bots")
     async def inviter_list_bots(request: Request):
-        _admin_guard(request)
-        bots = registry.list()
+        ident = _inviter_access(request)
+        bots = _bots_inviter(ident)
         items = [b.public() for b in bots]
         stale: list[BotRecord] = []
         for it, b in zip(items, bots):
@@ -1225,25 +1465,145 @@ def create_app() -> FastAPI:
             asyncio.create_task(refresh_health_background(stale))
         return {"bots": items}
 
-    INVITER_PROXY_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+    @app.post("/api/inviter/bots", status_code=201)
+    async def inviter_add_bot(payload: dict[str, Any], request: Request):
+        ident = _inviter_access(request)
+        body = payload or {}
+        host = str(body.get("host", "")).strip()
+        if not host:
+            raise HTTPException(status_code=400, detail="host обязателен")
+        owner_id = "" if _panel_is_admin(ident) else _panel_user_id(ident)
+        rec = registry.add(
+            host=host,
+            ssh_port=int(body.get("sshPort", body.get("ssh_port", 22))),
+            ssh_user=str(body.get("sshUser", body.get("ssh_user", "root"))),
+            alias=str(body.get("alias", "")),
+            install_dir=str(body.get("installDir", body.get("install_dir", "/opt/userbot"))),
+            api_port=int(body.get("apiPort", body.get("api_port", 8080))),
+            api_token=str(body.get("apiToken", body.get("api_token", ""))),
+            restart_interval_hours=max(
+                0,
+                min(
+                    int(
+                        body["restartIntervalHours"]
+                        if "restartIntervalHours" in body
+                        else body.get("restart_interval_hours", 12)
+                    ),
+                    168,
+                ),
+            ),
+            owner_id=owner_id,
+            suite="inviter",
+        )
+        return rec.public()
 
-    async def _proxy_inviter(bid: str, method: str, sub: str, request: Request) -> Response:
-        _admin_guard(request)
-        bid = security.validate_safe_id(bid, name="bot_id")
-        rec = registry.get(bid)
+    @app.patch("/api/inviter/bots/{bid}")
+    async def inviter_patch_bot(bid: str, payload: dict[str, Any], request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        allowed = {
+            "alias": "alias",
+            "host": "host",
+            "sshPort": "ssh_port",
+            "sshUser": "ssh_user",
+            "installDir": "install_dir",
+            "apiPort": "api_port",
+            "apiToken": "api_token",
+            "status": "status",
+            "restartIntervalHours": "restart_interval_hours",
+        }
+        patch = {allowed[k]: v for k, v in (payload or {}).items() if k in allowed}
+        if "restart_interval_hours" in patch:
+            try:
+                h = int(patch["restart_interval_hours"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="restartIntervalHours должно быть числом")
+            patch["restart_interval_hours"] = max(0, min(h, 168))
+        prev_hours = rec.restart_interval_hours
+        rec = registry.update(rec.id, **patch)
         if rec is None:
             raise HTTPException(status_code=404, detail="not found")
+        if (
+            "restart_interval_hours" in patch
+            and patch["restart_interval_hours"] != prev_hours
+            and rec.has_ssh_key
+            and rec.status not in ("new",)
+        ):
+            _start_bg(deployer.sync_restart_timer_remote(rec.id, registry))
+        return rec.public()
+
+    @app.delete("/api/inviter/bots/{bid}")
+    async def inviter_delete_bot(bid: str, request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        if not registry.remove(rec.id):
+            raise HTTPException(status_code=404, detail="not found")
+        return {"ok": True}
+
+    @app.post("/api/inviter/bots/{bid}/deploy")
+    async def inviter_deploy_bot(bid: str, payload: dict[str, Any], request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        body = payload or {}
+        password = body.get("sshPassword") or body.get("password") or None
+        env = _inviter_deploy_env(body)
+        if rec.has_ssh_key and rec.status != "new":
+            try:
+                remote = await deployer.read_remote_env(rec, password=password)
+            except Exception:
+                remote = {}
+            env = deployer._merge_remote_env(env, remote)
+            if not env["API_ID"] or not env["API_HASH"]:
+                env["API_ID"] = env["API_ID"] or remote.get("API_ID", "")
+                env["API_HASH"] = env["API_HASH"] or remote.get("API_HASH", "")
+        if env["TELEGRAM_CLIENT_PROFILE"] == "custom" and (not env["API_ID"] or not env["API_HASH"]):
+            raise HTTPException(
+                status_code=400,
+                detail="API_ID и API_HASH обязательны при профиле custom",
+            )
+        _start_bg(deployer.deploy(rec.id, registry, password=password, env=env))
+        return {"ok": True, "operation": "deploy"}
+
+    @app.post("/api/inviter/bots/{bid}/restart")
+    async def inviter_restart_bot(bid: str, payload: dict[str, Any] | None, request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        password = (payload or {}).get("sshPassword") or (payload or {}).get("password")
+        _start_bg(deployer.restart_remote(rec.id, registry, password=password))
+        return {"ok": True, "operation": "restart"}
+
+    @app.post("/api/inviter/bots/{bid}/stop")
+    async def inviter_stop_bot(bid: str, payload: dict[str, Any] | None, request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        password = (payload or {}).get("sshPassword") or (payload or {}).get("password")
+        _start_bg(deployer.stop_remote(rec.id, registry, password=password))
+        return {"ok": True, "operation": "stop"}
+
+    @app.post("/api/inviter/bots/{bid}/uninstall")
+    async def inviter_uninstall_bot(bid: str, payload: dict[str, Any] | None, request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        password = (payload or {}).get("sshPassword") or (payload or {}).get("password")
+        _start_bg(deployer.uninstall_remote(rec.id, registry, password=password))
+        return {"ok": True, "operation": "uninstall"}
+
+    @app.get("/api/inviter/bots/{bid}/deploy/log")
+    async def inviter_deploy_log(bid: str, request: Request):
+        _, rec = _require_inviter_owned_bot_access(request, bid)
+        return deployer.get_state(rec.id).snapshot()
+
+    async def _proxy_inviter_bot(
+        rec: BotRecord, method: str, sub: str, request: Request, *, inviter_api: bool
+    ) -> Response:
         if not rec.api_token:
             raise HTTPException(status_code=400, detail="у бота нет API токена")
-
         body = await request.body()
         ct = request.headers.get("content-type", "")
         extra: dict[str, str] = {}
         if ct:
             extra["Content-Type"] = ct
         path = sub.lstrip("/")
-        if not path.startswith("inviter/"):
-            path = "inviter/" + path
+        if inviter_api:
+            if not path.startswith("inviter/"):
+                path = "inviter/" + path
+            timeout = INVITER_PROXY_TIMEOUT
+        else:
+            timeout = _proxy_timeout_for(path)
         try:
             r = await bot_request(
                 rec,
@@ -1252,7 +1612,7 @@ def create_app() -> FastAPI:
                 content=body if body else None,
                 extra_headers=extra or None,
                 params=dict(request.query_params),
-                timeout=INVITER_PROXY_TIMEOUT,
+                timeout=timeout,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
@@ -1262,13 +1622,17 @@ def create_app() -> FastAPI:
         }
         return Response(content=r.content, status_code=r.status_code, headers=resp_headers)
 
+    @app.api_route(
+        "/api/inviter/bots/{bid}/proxy/{path:path}",
+        methods=["GET", "POST", "PATCH", "DELETE", "PUT"],
+    )
+    async def inviter_panel_proxy(bid: str, path: str, request: Request):
+        _, rec = _require_inviter_bot_access(request, bid)
+        return await _proxy_inviter_bot(rec, request.method, path, request, inviter_api=False)
+
     @app.get("/api/inviter/bots/{bid}/accounts")
     async def inviter_bot_accounts(bid: str, request: Request):
-        _admin_guard(request)
-        bid = security.validate_safe_id(bid, name="bot_id")
-        rec = registry.get(bid)
-        if rec is None:
-            raise HTTPException(status_code=404, detail="not found")
+        _, rec = _require_inviter_bot_access(request, bid)
         if not rec.api_token:
             raise HTTPException(status_code=400, detail="у бота нет API токена")
         try:
@@ -1284,7 +1648,8 @@ def create_app() -> FastAPI:
         methods=["GET", "POST", "PATCH", "DELETE", "PUT"],
     )
     async def inviter_proxy(bid: str, path: str, request: Request):
-        return await _proxy_inviter(bid, request.method, path, request)
+        _, rec = _require_inviter_bot_access(request, bid)
+        return await _proxy_inviter_bot(rec, request.method, path, request, inviter_api=True)
 
     # ===================================================== static frontend
     @app.get("/", include_in_schema=False)

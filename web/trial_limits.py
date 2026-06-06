@@ -64,6 +64,27 @@ async def count_owner_accounts(registry: BotRegistry, owner_id: str) -> int:
     return total
 
 
+async def owner_usage_stats(registry: BotRegistry, owner_id: str) -> dict[str, int]:
+    """VDS (bots) and Telegram slots for a panel user."""
+    import overview_cache
+
+    bots = registry.list_for(owner_id)
+    bots_used = len(bots)
+    accounts_used = 0
+    for bot in bots:
+        ov = overview_cache.get(bot.id)
+        if ov is not None:
+            totals = ov.get("totals") if isinstance(ov.get("totals"), dict) else {}
+            n = int(totals.get("accounts") or 0)
+            if n <= 0 and isinstance(ov.get("accounts"), list):
+                n = len(ov["accounts"])
+            accounts_used += n
+            continue
+        if bot.api_token:
+            accounts_used += len(await account_ids_on_bot(bot))
+    return {"botsUsed": bots_used, "accountsUsed": accounts_used}
+
+
 async def enforce_trial_account_limit(
     rec: Optional[UserRecord],
     registry: BotRegistry,

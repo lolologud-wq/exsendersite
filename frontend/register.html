@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/style.css?v=verify3" />
   <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
 </head>
 <body class="login-body">
@@ -17,45 +17,82 @@
       <div class="login-brand">
         <a href="/" class="logo-mark">e</a>
         <div>
-          <h1 class="login-title">Создать аккаунт</h1>
-          <p class="login-sub">1 день бесплатно · 1 сервер и 2 аккаунта</p>
+          <h1 class="login-title" id="registerTitle">Создать аккаунт</h1>
+          <p class="login-sub" id="registerSub">1 день бесплатно · 1 сервер и 2 аккаунта</p>
         </div>
       </div>
 
-      <form id="registerForm" class="login-form" autocomplete="on">
-        <div class="field">
-          <label class="field-label" for="email">Email</label>
-          <input class="input" id="email" name="email" type="email" required autocomplete="email" placeholder="you@example.com" />
+      <div class="register-flow">
+        <form id="registerForm" class="login-form register-step" autocomplete="on">
+          <div class="field">
+            <label class="field-label" for="email">Email</label>
+            <input class="input" id="email" name="email" type="email" required autocomplete="email" placeholder="you@example.com" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="password">Пароль</label>
+            <input class="input" id="password" name="password" type="password" minlength="8" required autocomplete="new-password" placeholder="мин. 8 символов, буквы и цифры" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="name">Имя <span class="field-mute">(опционально)</span></label>
+            <input class="input" id="name" name="name" type="text" maxlength="80" autocomplete="name" />
+          </div>
+
+          <div class="field hp-field" aria-hidden="true">
+            <label class="field-label" for="website">Website</label>
+            <input class="input" id="website" name="_website" type="text" tabindex="-1" autocomplete="off" />
+          </div>
+
+          <p class="login-error" id="registerError" hidden></p>
+
+          <button type="submit" class="btn-primary login-submit" id="registerBtn">
+            <span>Продолжить</span>
+          </button>
+
+          <p class="login-foot">
+            Уже есть аккаунт? <a href="/login">Войти</a>
+          </p>
+        </form>
+
+        <div id="verifyPanel" class="login-form register-verify" hidden>
+          <div class="register-verify-hero">
+            <div class="register-verify-icon" aria-hidden="true">
+              <img src="img/telegram-logo.svg" alt="" width="64" height="64" />
+            </div>
+            <h2 class="register-verify-title">Подтвердите в Telegram</h2>
+            <p class="register-verify-text">
+              Нажмите кнопку ниже, откройте бота и нажмите <strong>Start</strong>.
+              Без этого аккаунт не создаётся.
+            </p>
+          </div>
+
+          <a
+            id="verifyBotLink"
+            class="btn-telegram login-submit"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <img src="img/telegram-logo.svg" alt="" class="btn-telegram-icon" width="22" height="22" />
+            <span id="verifyBotLabel">Открыть бота в Telegram</span>
+          </a>
+
+          <div class="register-verify-status" id="verifyWait">
+            <span class="register-verify-pulse" aria-hidden="true"></span>
+            <span class="register-verify-status-text">Ожидаем подтверждение…</span>
+          </div>
+
+          <p class="login-error" id="verifyError" hidden></p>
+
+          <button type="button" class="btn-ghost login-submit" id="verifyBackBtn">
+            Назад к форме
+          </button>
         </div>
-
-        <div class="field">
-          <label class="field-label" for="password">Пароль</label>
-          <input class="input" id="password" name="password" type="password" minlength="8" required autocomplete="new-password" placeholder="мин. 8 символов, буквы и цифры" />
-        </div>
-
-        <div class="field">
-          <label class="field-label" for="name">Имя <span class="field-mute">(опционально)</span></label>
-          <input class="input" id="name" name="name" type="text" maxlength="80" autocomplete="name" />
-        </div>
-
-        <div class="field hp-field" aria-hidden="true">
-          <label class="field-label" for="website">Website</label>
-          <input class="input" id="website" name="_website" type="text" tabindex="-1" autocomplete="off" />
-        </div>
-
-        <p class="login-error" id="registerError" hidden></p>
-
-        <button type="submit" class="btn-primary login-submit" id="registerBtn">
-          <span>Зарегистрироваться</span>
-        </button>
-
-        <p class="login-foot">
-          Уже есть аккаунт? <a href="/login">Войти</a>
-        </p>
-      </form>
+      </div>
     </div>
   </div>
   <script src="js/http.js"></script>
-  <script src="js/register.js"></script>
+  <script src="js/register.js?v=verify2"></script>
 </body>
 </html>

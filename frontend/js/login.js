@@ -3,12 +3,25 @@
   const errEl = document.getElementById("loginError");
   const btn = document.getElementById("loginBtn");
 
+  let nextPath = "";
+  try {
+    nextPath = new URL(window.location.href).searchParams.get("next") || "";
+    if (nextPath && !nextPath.startsWith("/")) nextPath = "";
+  } catch (_) { /* ignore */ }
+
+  function defaultRedirect(kind) {
+    if (nextPath) return nextPath;
+    const host = (window.location.hostname || "").toLowerCase();
+    if (host.startsWith("inviter.")) return "/inviter";
+    return kind === "admin" ? "/admin" : "/app";
+  }
+
   async function checkSession() {
     try {
       const r = await fetch("/api/auth/me", { credentials: "same-origin" });
       const data = await r.json();
       if (data.user) {
-        window.location.replace(data.kind === "admin" ? "/admin" : "/app");
+        window.location.replace(defaultRedirect(data.kind));
       }
     } catch (_) {
       /* ignore */
@@ -34,7 +47,7 @@
 
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        window.location.replace(data.redirect || "/app");
+        window.location.replace(nextPath || data.redirect || defaultRedirect(data.kind));
         return;
       }
       errEl.textContent = data.detail === "bad credentials"

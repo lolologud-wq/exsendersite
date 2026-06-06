@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable
+from typing import Any
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -21,13 +22,51 @@ from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 
 
+def _input_user_id(user: Any) -> int | None:
+    uid = getattr(user, "user_id", None)
+    if uid:
+        return int(uid)
+    uid = getattr(user, "id", None)
+    if uid:
+        return int(uid)
+    return None
+
+
+def _results_from_invited_users(result: Any, users: list[Any]) -> list[str]:
+    """Telegram returns per-user failures in missing_invitees — not only exceptions."""
+    missing = getattr(result, "missing_invitees", None) or []
+    missing_by_id: dict[int, str] = {}
+    for item in missing:
+        uid = int(getattr(item, "user_id", 0) or 0)
+        if not uid:
+            continue
+        if getattr(item, "premium_would_allow_invite", False) or getattr(
+            item, "premium_required_for_pm", False
+        ):
+            missing_by_id[uid] = "premium_required"
+        else:
+            missing_by_id[uid] = "privacy_restricted"
+    out: list[str] = []
+    for user in users:
+        uid = _input_user_id(user)
+        if uid and uid in missing_by_id:
+            out.append(missing_by_id[uid])
+        else:
+            out.append("invited")
+    return out
+
+
 def get_antiflood_timing(base_delay: float) -> tuple[float, float, int, float, float]:
-    delay_min = float(os.getenv("INVITE_DELAY_MIN_SEC", "0.1"))
-    delay_max = float(os.getenv("INVITE_DELAY_MAX_SEC", "2.0"))
-    if delay_max < delay_min:
-        delay_max = delay_min
-    per_invite_min = max(base_delay, delay_min)
-    per_invite_max = max(per_invite_min, delay_max)
+    base = max(0.0, float(base_delay))
+    if base > 0:
+        jitter = float(os.getenv("INVITE_DELAY_JITTER", "0.15"))
+        per_invite_min = max(0.05, base * (1.0 - jitter))
+        per_invite_max = max(per_invite_min, base * (1.0 + jitter))
+    else:
+        per_invite_min = float(os.getenv("INVITE_DELAY_MIN_SEC", "0.5"))
+        per_invite_max = float(os.getenv("INVITE_DELAY_MAX_SEC", "2.0"))
+        if per_invite_max < per_invite_min:
+            per_invite_max = per_invite_min
     batch_size = int(os.getenv("INVITE_BATCH_SIZE", "0"))
     batch_pause_min = float(os.getenv("INVITE_BATCH_PAUSE_MIN_SEC", "0"))
     batch_pause_max = float(os.getenv("INVITE_BATCH_PAUSE_MAX_SEC", "0"))
@@ -36,15 +75,75 @@ def get_antiflood_timing(base_delay: float) -> tuple[float, float, int, float, f
     return per_invite_min, per_invite_max, max(0, batch_size), batch_pause_min, batch_pause_max
 
 
+_INVITE_COOLDOWN_RESULTS = frozenset({"invited", "invited_after_wait"})
+
+
+def needs_invite_cooldown(result: str) -> bool:
+    return result in _INVITE_COOLDOWN_RESULTS
+
+
+def invite_api_batch_size() -> int:
+    return max(1, min(int(os.getenv("INVITE_API_BATCH", "5")), 20))
+
+
+async def invite_many(client: TelegramClient, target_input, users: list[Any]) -> list[str]:
+    if not users:
+        return []
+    if len(users) == 1:
+        return [await invite_one(client, target_input, users[0])]
+    if not isinstance(target_input, InputPeerChannel):
+        out: list[str] = []
+        for user in users:
+            out.append(await invite_one(client, target_input, user))
+        return out
+    try:
+        result = await client(InviteToChannelRequest(channel=target_input, users=users))
+        return _results_from_invited_users(result, users)
+    except (
+        UserAlreadyParticipantError,
+        UserPrivacyRestrictedError,
+        UserChannelsTooMuchError,
+        PeerFloodError,
+        ChatAdminRequiredError,
+        ChatWriteForbiddenError,
+        ChannelPrivateError,
+    ):
+        out = []
+        for user in users:
+            out.append(await invite_one(client, target_input, user))
+        return out
+    except FloodWaitError as error:
+        await asyncio.sleep(error.seconds + 1)
+        try:
+            result = await client(InviteToChannelRequest(channel=target_input, users=users))
+            return [
+                "invited_after_wait" if r == "invited" else r
+                for r in _results_from_invited_users(result, users)
+            ]
+        except RPCError:
+            out = []
+            for user in users:
+                out.append(await invite_one(client, target_input, user))
+            return out
+    except RPCError:
+        out = []
+        for user in users:
+            out.append(await invite_one(client, target_input, user))
+        return out
+
+
 async def invite_one(client: TelegramClient, target_input, user) -> str:
     try:
         if isinstance(target_input, InputPeerChannel):
-            await client(InviteToChannelRequest(channel=target_input, users=[user]))
+            result = await client(InviteToChannelRequest(channel=target_input, users=[user]))
+            return _results_from_invited_users(result, [user])[0]
         elif isinstance(target_input, InputPeerChat):
-            await client(AddChatUserRequest(chat_id=target_input.chat_id, user_id=user, fwd_limit=10))
+            result = await client(
+                AddChatUserRequest(chat_id=target_input.chat_id, user_id=user, fwd_limit=10)
+            )
+            return _results_from_invited_users(result, [user])[0]
         else:
             return "unsupported_target_type"
-        return "invited"
     except UserAlreadyParticipantError:
         return "already_in_chat"
     except UserPrivacyRestrictedError:
@@ -63,14 +162,16 @@ async def invite_one(client: TelegramClient, target_input, user) -> str:
         await asyncio.sleep(error.seconds + 1)
         try:
             if isinstance(target_input, InputPeerChannel):
-                await client(InviteToChannelRequest(channel=target_input, users=[user]))
+                result = await client(InviteToChannelRequest(channel=target_input, users=[user]))
+                status = _results_from_invited_users(result, [user])[0]
             elif isinstance(target_input, InputPeerChat):
-                await client(
+                result = await client(
                     AddChatUserRequest(chat_id=target_input.chat_id, user_id=user, fwd_limit=10)
                 )
+                status = _results_from_invited_users(result, [user])[0]
             else:
                 return "unsupported_target_type"
-            return "invited_after_wait"
+            return "invited_after_wait" if status == "invited" else status
         except RPCError:
             return "failed_after_wait"
     except RPCError as error:

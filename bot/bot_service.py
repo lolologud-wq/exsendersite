@@ -42,7 +42,7 @@ from state import (
     validate_spam_start,
 )
 from group_dialogs import group_chat_title, list_broadcast_channels, list_group_chats
-from telethon_join import resolve_tme_post_for_forward
+from telethon_join import parse_tme_post_link, resolve_tme_post_ids
 from telethon_accounts import (
     connect_client_with_fallback,
     make_telethon_client,
@@ -51,6 +51,8 @@ from telethon_accounts import (
 from telethon_client_profile import TelegramApiConfig, request_login_code
 
 logger = logging.getLogger(__name__)
+
+RESOLVE_POST_TIMEOUT_SEC = float(os.getenv("RESOLVE_POST_TIMEOUT_SEC", "30") or 30)
 
 
 class ServiceError(Exception):
@@ -456,17 +458,36 @@ class BotService:
 
     async def resolve_post_link(self, slot_id: str, url: str) -> dict[str, Any]:
         self._require_account(slot_id)
-        client = await self._ensure_client(slot_id)
-        if not await _telethon_ready(client):
-            raise ServiceError("Аккаунт не авторизован в Telegram", status=400)
         raw = (url or "").strip()
         if not raw:
             raise ServiceError("url обязателен")
-        result = await resolve_tme_post_for_forward(client, raw)
-        if not result:
-            raise ServiceError("Ссылка недоступна или неверный формат t.me/…", status=400)
-        peer_id, message_id = result
-        return {"channelId": str(peer_id), "messageId": int(message_id)}
+        parsed = parse_tme_post_link(raw)
+        if parsed is not None and isinstance(parsed[0], int):
+            peer_id, message_id = int(parsed[0]), int(parsed[1])
+            return {"channelId": str(peer_id), "messageId": message_id}
+
+        async def _resolve_live() -> dict[str, Any]:
+            client = await self._ensure_client(slot_id)
+            if not await _telethon_ready(client):
+                raise ServiceError("Аккаунт не авторизован в Telegram", status=400)
+            result = await resolve_tme_post_ids(client, raw, verify_message=False)
+            if not result:
+                raise ServiceError(
+                    "Ссылка недоступна: канал не найден или аккаунт не видит его",
+                    status=400,
+                )
+            peer_id, message_id = result
+            return {"channelId": str(peer_id), "messageId": int(message_id)}
+
+        try:
+            return await asyncio.wait_for(
+                _resolve_live(), timeout=RESOLVE_POST_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError as e:
+            raise ServiceError(
+                "Таймаут проверки ссылки — аккаунт не отвечает или канал недоступен",
+                status=504,
+            ) from e
 
     # ============================================================== slot CRUD
     def _require_account(self, aid: str) -> RuntimeState:

@@ -44,6 +44,10 @@ def _hash_password(password: str, *, salt: Optional[bytes] = None) -> str:
     return f"pbkdf2$sha256${PBKDF2_ITERS}${salt.hex()}${key.hex()}"
 
 
+def hash_password(password: str) -> str:
+    return _hash_password(password)
+
+
 def _verify_password(password: str, stored: str) -> bool:
     try:
         algo, sub, iters_s, salt_hex, key_hex = stored.split("$")
@@ -76,6 +80,8 @@ class UserRecord:
     trial_used: bool = False
     referral_balance_usd: float = 0.0
     referral_earned_total: float = 0.0
+    telegram_user_id: int = 0
+    telegram_username: str = ""
 
     def public(self) -> dict[str, Any]:
         now = time.time()
@@ -96,6 +102,7 @@ class UserRecord:
             "referralCode": self.referral_code,
             "referralBalanceUsd": round(float(self.referral_balance_usd or 0), 2),
             "referralEarnedTotal": round(float(self.referral_earned_total or 0), 2),
+            "telegramLinked": self.telegram_user_id > 0,
         }
         if self.plan == "trial" and active:
             from trial_limits import trial_limits_meta
@@ -107,6 +114,8 @@ class UserRecord:
         d = self.public()
         d["referredBy"] = self.referred_by
         d["lastLoginAt"] = self.last_login_at
+        d["telegramUserId"] = self.telegram_user_id
+        d["telegramUsername"] = self.telegram_username
         return d
 
 
@@ -157,6 +166,8 @@ class UserStore:
                     trial_used=bool(row.get("trial_used", False)),
                     referral_balance_usd=float(row.get("referral_balance_usd", 0) or 0),
                     referral_earned_total=float(row.get("referral_earned_total", 0) or 0),
+                    telegram_user_id=int(row.get("telegram_user_id", 0) or 0),
+                    telegram_username=str(row.get("telegram_username", "")),
                 )
             except (KeyError, ValueError):
                 continue
@@ -194,6 +205,18 @@ class UserStore:
         uid = self._email_idx.get(email.strip().lower())
         return self._users.get(uid) if uid else None
 
+    def by_telegram_id(self, telegram_user_id: int) -> Optional[UserRecord]:
+        tg = int(telegram_user_id or 0)
+        if tg <= 0:
+            return None
+        for u in self._users.values():
+            if u.telegram_user_id == tg:
+                return u
+        return None
+
+    def telegram_taken(self, telegram_user_id: int) -> bool:
+        return self.by_telegram_id(telegram_user_id) is not None
+
     def create(
         self,
         email: str,
@@ -217,6 +240,48 @@ class UserStore:
                 name=name.strip()[:80],
                 referral_code=_gen_referral_code(codes),
                 referred_by=referred_by.strip(),
+            )
+            if TRIAL_DAYS > 0:
+                rec.plan = "trial"
+                rec.plan_expires_at = time.time() + float(TRIAL_DAYS) * 86400.0
+                rec.trial_used = True
+            self._users[uid] = rec
+            self._email_idx[email_norm] = uid
+            self._save_locked()
+            return rec
+
+    def create_with_hash(
+        self,
+        email: str,
+        password_hash: str,
+        name: str = "",
+        *,
+        referred_by: str = "",
+        telegram_user_id: int = 0,
+        telegram_username: str = "",
+    ) -> UserRecord:
+        email_norm = email.strip().lower()
+        tg = int(telegram_user_id or 0)
+        with self._lock:
+            if email_norm in self._email_idx:
+                raise ValueError("Аккаунт с такой почтой уже зарегистрирован")
+            if tg > 0:
+                for u in self._users.values():
+                    if u.telegram_user_id == tg:
+                        raise ValueError("Этот Telegram уже привязан к другому аккаунту")
+            uid = secrets.token_urlsafe(9)
+            while uid in self._users:
+                uid = secrets.token_urlsafe(9)
+            codes = {u.referral_code for u in self._users.values() if u.referral_code}
+            rec = UserRecord(
+                id=uid,
+                email=email_norm,
+                password_hash=password_hash,
+                name=name.strip()[:80],
+                referral_code=_gen_referral_code(codes),
+                referred_by=referred_by.strip(),
+                telegram_user_id=tg,
+                telegram_username=(telegram_username or "").strip().lstrip("@")[:64],
             )
             if TRIAL_DAYS > 0:
                 rec.plan = "trial"

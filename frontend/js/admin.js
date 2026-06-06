@@ -21,6 +21,25 @@
       .replace(/"/g, "&quot;");
   }
 
+  function renderUsageCount(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return '<span class="adm-tg-mute">—</span>';
+    return `<span class="adm-usage-num">${escapeHtml(String(v))}</span>`;
+  }
+
+  function renderTelegramCell(u) {
+    const tgId = Number(u.telegramUserId || 0);
+    const username = String(u.telegramUsername || "").trim().replace(/^@/, "");
+    if (!tgId) {
+      return '<span class="adm-tg-mute">—</span>';
+    }
+    if (username) {
+      const uname = escapeHtml(username);
+      return `<a class="adm-tg-link" href="https://t.me/${uname}" target="_blank" rel="noopener noreferrer">@${uname}</a>`;
+    }
+    return `<span class="adm-tg-id" title="Telegram ID">id ${escapeHtml(String(tgId))}</span>`;
+  }
+
   function showAlert(msg, kind = "err") {
     const errEl = document.getElementById("admAlert");
     const okEl = document.getElementById("admOk");
@@ -290,7 +309,7 @@
     const body = document.getElementById("admUsersBody");
     if (!body) return;
     if (!items?.length) {
-      body.innerHTML = '<tr><td colspan="7" class="adm-empty">Пользователей пока нет.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="adm-empty">Пользователей пока нет.</td></tr>';
       return;
     }
     body.innerHTML = items.map((u) => {
@@ -303,6 +322,9 @@
       return `
         <tr data-uid="${escapeHtml(u.id)}">
           <td>${escapeHtml(u.email)}</td>
+          <td class="adm-tg-cell">${renderTelegramCell(u)}</td>
+          <td class="adm-usage-cell">${renderUsageCount(u.botsUsed)}</td>
+          <td class="adm-usage-cell">${renderUsageCount(u.accountsUsed)}</td>
           <td><code>${escapeHtml(u.referralCode || "—")}</code></td>
           <td><b>${escapeHtml(fmtUsd(refBal))}</b></td>
           <td>${escapeHtml(u.plan || "—")}</td>

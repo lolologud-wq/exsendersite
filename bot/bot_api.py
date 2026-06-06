@@ -340,6 +340,12 @@ def build_app(
             raise HTTPException(status_code=503, detail="inviter disabled")
         return inv.get_job()
 
+    @app.get("/api/local/inviter/parse", dependencies=[Depends(require_token)])
+    async def inviter_parse_status() -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return inv.get_parse()
+
     return app
 
 

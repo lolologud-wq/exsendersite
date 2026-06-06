@@ -215,6 +215,67 @@ const fetchAccountDialogs = (aid, botId, force = false) => {
 };
 const fetchAccountChannels = (aid, botId)      => botApi("GET",    `/accounts/${encodeURIComponent(aid)}/channels`, undefined, botId);
 const resolvePostLink      = (aid, url, botId) => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/resolve_post`, { url }, botId);
+
+const RESOLVE_POST_CLIENT_MS = 45000;
+
+function normalizeTmeUrl(text) {
+  return String(text || "").trim().split(/[?#]/)[0].replace(/\/+$/, "");
+}
+
+function parseTmePostUrl(text) {
+  const s = normalizeTmeUrl(text);
+  let m = s.match(/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/c\/(\d+)\/(\d+)/i);
+  if (m) {
+    return { channelId: String(-100 * parseInt(m[1], 10)), messageId: parseInt(m[2], 10) };
+  }
+  m = s.match(/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z][a-zA-Z0-9_]{3,})\/(\d+)/i);
+  if (m) {
+    const u = m[1].toLowerCase();
+    if (u === "c" || u === "joinchat" || u === "addstickers" || u === "s") return null;
+    return { needsResolve: true, username: m[1], messageId: parseInt(m[2], 10) };
+  }
+  return null;
+}
+
+async function resolvePostLinkWithTimeout(aid, url, botId, ms = RESOLVE_POST_CLIENT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const bid = requireBot(botId);
+    const opts = {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+      signal: ctrl.signal,
+    };
+    await ensureCsrf();
+    const tok = readCsrf();
+    if (tok) opts.headers["X-CSRF-Token"] = tok;
+    const res = await secureFetch(
+      `/api/bots/${encodeURIComponent(bid)}/proxy/accounts/${encodeURIComponent(aid)}/resolve_post`,
+      opts,
+    );
+    const ct = res.headers.get("content-type") || "";
+    const data = ct.includes("application/json") ? await res.json() : null;
+    if (!res.ok) {
+      let msg = data?.error || data?.detail || `HTTP ${res.status}`;
+      if (typeof msg !== "string") msg = JSON.stringify(msg);
+      throw new Error(decodeApiError(msg));
+    }
+    return data;
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      throw new Error(
+        "Таймаут проверки ссылки — аккаунт долго отвечает. "
+        + "Для приватных каналов используйте ссылку вида t.me/c/ID/номер_поста"
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const addChat            = (aid, body, botId)  => botApi("POST",   `/accounts/${encodeURIComponent(aid)}/chats`, body, botId);
 const createSlot         = (body, botId)       => botApi("POST",   "/accounts", body, botId);
 const deleteSlot         = (aid, botId)        => botApi("DELETE", `/accounts/${encodeURIComponent(aid)}`, undefined, botId);
@@ -2777,16 +2838,19 @@ async function applySourceFromPost(url) {
   if (!botId || !accountId) { toastErr(new Error("Выбери аккаунт")); return; }
   const ctx = STATE.sourcesChatContext;
   try {
-    const res = await resolvePostLink(accountId, url, botId);
+    const parsed = parseTmePostUrl(url);
+    const res = parsed?.channelId
+      ? { channelId: parsed.channelId, messageId: parsed.messageId }
+      : await resolvePostLinkWithTimeout(accountId, url, botId);
     if (ctx) {
       await patchChat(ctx.accountId, ctx.chatId, {
-        sourceChannelId: Number(res.channelId),
+        sourceChannelId: res.channelId,
         sourceMessageId: res.messageId,
       }, ctx.botId);
       toastOk(`Источник чата ${ctx.chatId} обновлён`);
     } else {
       await patchSlot(accountId, {
-        globalSourceChannelId: Number(res.channelId),
+        globalSourceChannelId: res.channelId,
         globalSourceMessageId: res.messageId,
       }, botId);
       toastOk("Общий источник обновлён");
@@ -2835,6 +2899,41 @@ async function setChatChannelSource(channelId) {
   } catch (e) { toastErr(e); }
 }
 
+async function applyChatPostFromUrl(botId, accountId, chatId, url, opts = {}) {
+  const raw = String(url || "").trim();
+  if (!raw) throw new Error("Вставь ссылку t.me на пост");
+  const parsed = parseTmePostUrl(raw);
+  let channelId;
+  let messageId;
+  if (parsed && parsed.channelId) {
+    channelId = parsed.channelId;
+    messageId = parsed.messageId;
+  } else {
+    const res = await resolvePostLinkWithTimeout(accountId, raw, botId);
+    channelId = res.channelId;
+    messageId = res.messageId;
+  }
+  const useForward = opts.sourceForward !== false;
+  const patch = {
+    sourceChannelId: channelId,
+    sourceMessageId: messageId,
+    sourceForward: useForward,
+  };
+  await patchChat(accountId, String(chatId), patch, botId);
+  syncChatPatchLocal(botId, accountId, chatId, {
+    sourceChannelId: channelId,
+    sourceMessageId: messageId,
+    sourceForward: useForward,
+    configured: true,
+  });
+  return {
+    channelId,
+    messageId,
+    sourceForward: useForward,
+    label: formatSourceLabel(channelId, messageId, useForward),
+  };
+}
+
 // =======================================================
 //  Per-chat settings modal
 // =======================================================
@@ -2869,14 +2968,14 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
       <form class="form-grid" id="chatSettingsForm" autocomplete="off">
         <div class="callout">${escapeHtml(botLabel(botId))} · ${escapeHtml(accountId)}</div>
         <label class="check"><input type="checkbox" name="enabled" ${c.enabled ? "checked" : ""} /><span>Включён в рассылке</span></label>
-        <label class="field">
+        <div class="field">
           <span class="field-label">Пост для рассылки (t.me)</span>
           <div class="field-row" style="gap:8px;">
-            <input class="input mono" id="chatPostUrl" placeholder="https://t.me/channel/123" />
+            <input class="input mono" id="chatPostUrl" placeholder="https://t.me/channel/123" autocomplete="off" />
             <button type="button" class="btn-primary" id="chatApplyPostBtn">Применить</button>
           </div>
           <span class="field-hint">Ссылка на пост — будет пересылаться/копироваться в этот чат</span>
-        </label>
+        </div>
         <label class="field"><span class="field-label">Кастомное сообщение</span><textarea class="input" name="customMessage" rows="3" placeholder="пусто = стандартный текст из «Настройки»">${escapeHtml(c.customMessage || "")}</textarea></label>
         <label class="field"><span class="field-label">Несколько текстов (через строку ---)</span><textarea class="input" name="textVariants" rows="4" placeholder="вар1\n---\nвар2">${escapeHtml(variantsToText(c.textVariants))}</textarea></label>
         <label class="field"><span class="field-label">Доп. текст (только при копии, не forward)</span><textarea class="input" name="extraText" rows="2">${escapeHtml(c.extraText || "")}</textarea></label>
@@ -2903,30 +3002,62 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
   });
   document.getElementById("modalPanel").classList.add("modal-wide");
 
-  document.getElementById("chatApplyPostBtn")?.addEventListener("click", async () => {
-    const url = String(document.getElementById("chatPostUrl")?.value || "").trim();
-    if (!url) { toastErr(new Error("Вставь ссылку t.me на пост")); return; }
-    const btn = document.getElementById("chatApplyPostBtn");
-    if (btn) btn.disabled = true;
+  const chatSettingsForm = document.getElementById("chatSettingsForm");
+  const chatPostInput = document.getElementById("chatPostUrl");
+  const chatApplyBtn = document.getElementById("chatApplyPostBtn");
+  if (chatApplyBtn && !chatApplyBtn.dataset.idleLabel) {
+    chatApplyBtn.dataset.idleLabel = chatApplyBtn.textContent || "Применить";
+  }
+  let chatPostApplyBusy = false;
+
+  async function runApplyChatPost() {
+    if (chatPostApplyBusy) return false;
+    const url = String(chatPostInput?.value || "").trim();
+    if (!url) { toastErr(new Error("Вставь ссылку t.me на пост")); return false; }
+    const forwardEl = chatSettingsForm?.querySelector('[name="sourceForward"]');
+    const useForward = forwardEl ? !!forwardEl.checked : true;
+    const idleLabel = chatApplyBtn?.dataset.idleLabel || "Применить";
+    chatPostApplyBusy = true;
+    if (chatApplyBtn) {
+      chatApplyBtn.disabled = true;
+      chatApplyBtn.textContent = "Проверяю…";
+    }
     try {
-      const res = await resolvePostLink(accountId, url, botId);
-      await patchChat(accountId, chatId, {
-        sourceChannelId: Number(res.channelId),
-        sourceMessageId: res.messageId,
-      }, botId);
-      const label = formatSourceLabel(res.channelId, res.messageId, c.sourceForward);
+      const applied = await applyChatPostFromUrl(botId, accountId, chatId, url, {
+        sourceForward: useForward,
+      });
+      c.sourceChannelId = applied.channelId;
+      c.sourceMessageId = applied.messageId;
+      c.sourceForward = applied.sourceForward;
       const el = document.getElementById("chatSourceLabel");
-      if (el) el.innerHTML = `Источник чата: <b>${escapeHtml(label)}</b>`;
-      const row = STATE.allChats.find((r) => r.botId === botId && r.accountId === accountId && r.chat.chatId === String(chatId));
-      if (row) {
-        row.chat.sourceChannelId = Number(res.channelId);
-        row.chat.sourceMessageId = res.messageId;
-        row.chat.configured = true;
-      }
+      if (el) el.innerHTML = `Источник чата: <b>${escapeHtml(applied.label)}</b>`;
+      if (forwardEl) forwardEl.checked = applied.sourceForward;
+      if (chatPostInput) chatPostInput.value = "";
       toastOk("Пост назначен для рассылки");
-      document.getElementById("chatPostUrl").value = "";
-    } catch (e) { toastErr(e); }
-    finally { if (btn) btn.disabled = false; }
+      renderAllChatsTable();
+      return true;
+    } catch (e) {
+      toastErr(e);
+      return false;
+    } finally {
+      chatPostApplyBusy = false;
+      if (chatApplyBtn) {
+        chatApplyBtn.disabled = false;
+        chatApplyBtn.textContent = idleLabel;
+      }
+    }
+  }
+
+  chatApplyBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    runApplyChatPost();
+  });
+  chatPostInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      runApplyChatPost();
+    }
   });
 
   document.getElementById("modalRoot").querySelector('[data-act="chat-clear-source"]')?.addEventListener("click", async () => {
@@ -2961,24 +3092,29 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
   bindModalSubmit(async () => {
     const f = document.getElementById("chatSettingsForm");
     const fd = new FormData(f);
-    const body = {
-      enabled: !!fd.get("enabled"),
-      customMessage: String(fd.get("customMessage") || ""),
-      textVariants: textToVariants(fd.get("textVariants")),
-      extraText: String(fd.get("extraText") || ""),
-      sourceForward: !!fd.get("sourceForward"),
-    };
-    const iv = String(fd.get("customIntervalMin") || "").trim();
-    const jt = String(fd.get("customIntervalJitter") || "").trim();
-    const lim = String(fd.get("messageLimit") || "").trim();
-    const sd = String(fd.get("startDelayMin") || "").trim();
-    body.customIntervalMin = iv === "" ? null : Number(iv);
-    body.customIntervalJitter = jt === "" ? null : Number(jt) / 100;
-    body.messageLimit = lim === "" ? null : Number(lim);
-    body.startDelayMin = sd === "" ? null : Number(sd);
+    const postUrl = String(chatPostInput?.value || "").trim();
     const btn = document.getElementById("modalSubmit");
     if (btn) btn.disabled = true;
     try {
+      if (postUrl) {
+        const ok = await runApplyChatPost();
+        if (!ok) return;
+      }
+      const body = {
+        enabled: !!fd.get("enabled"),
+        customMessage: String(fd.get("customMessage") || ""),
+        textVariants: textToVariants(fd.get("textVariants")),
+        extraText: String(fd.get("extraText") || ""),
+        sourceForward: !!fd.get("sourceForward"),
+      };
+      const iv = String(fd.get("customIntervalMin") || "").trim();
+      const jt = String(fd.get("customIntervalJitter") || "").trim();
+      const lim = String(fd.get("messageLimit") || "").trim();
+      const sd = String(fd.get("startDelayMin") || "").trim();
+      body.customIntervalMin = iv === "" ? null : Number(iv);
+      body.customIntervalJitter = jt === "" ? null : Number(jt) / 100;
+      body.messageLimit = lim === "" ? null : Number(lim);
+      body.startDelayMin = sd === "" ? null : Number(sd);
       await patchChat(accountId, String(chatId), body, botId);
       syncChatPatchLocal(botId, accountId, chatId, {
         enabled: body.enabled,
@@ -2986,6 +3122,8 @@ async function openChatSettingsModal(botId, accountId, chatId, chat) {
         textVariants: body.textVariants,
         extraText: body.extraText,
         sourceForward: body.sourceForward,
+        sourceChannelId: c.sourceChannelId,
+        sourceMessageId: c.sourceMessageId,
         customIntervalMin: body.customIntervalMin,
         customIntervalJitter: body.customIntervalJitter,
         messageLimit: body.messageLimit,

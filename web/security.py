@@ -267,20 +267,54 @@ def honeypot_triggered(body: dict[str, Any]) -> bool:
     return False
 
 
+def _csrf_cookie_secure(request: Request) -> bool:
+    from auth import _cookie_secure
+
+    if request.url.scheme == "https":
+        return True
+    return _cookie_secure()
+
+
+def _csrf_cookie_domain() -> str:
+    from auth import _cookie_domain
+
+    return (_cookie_domain() or "").strip()
+
+
+def _sign_csrf(raw: str) -> str:
+    secret = os.getenv("SITE_SECRET", "change-me-please-this-is-not-secret")
+    sig = hmac.new(secret.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return f"{raw}.{sig}"
+
+
+def _verify_signed_csrf(token: str) -> bool:
+    token = (token or "").strip()
+    if "." not in token:
+        return False
+    raw, sig = token.rsplit(".", 1)
+    if not raw or not sig:
+        return False
+    secret = os.getenv("SITE_SECRET", "change-me-please-this-is-not-secret")
+    expected = hmac.new(secret.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return hmac.compare_digest(sig, expected)
+
+
 def issue_csrf_token(response: Response, request: Request) -> str:
-    token = secrets.token_urlsafe(32)
-    secure = request.url.scheme == "https" or os.getenv("SITE_COOKIE_SECURE", "").strip() in (
-        "1", "true", "yes",
-    )
-    response.set_cookie(
-        CSRF_COOKIE,
-        token,
-        max_age=86400,
-        httponly=False,
-        samesite="lax",
-        secure=secure,
-        path="/",
-    )
+    token = _sign_csrf(secrets.token_urlsafe(24))
+    secure = _csrf_cookie_secure(request)
+    csrf_kw: dict[str, Any] = {
+        "max_age": 86400,
+        "httponly": False,
+        "samesite": "lax",
+        "secure": secure,
+        "path": "/",
+    }
+    cookie_dom = _csrf_cookie_domain()
+    response.delete_cookie(CSRF_COOKIE, path="/")
+    if cookie_dom:
+        response.delete_cookie(CSRF_COOKIE, path="/", domain=cookie_dom)
+        csrf_kw["domain"] = cookie_dom
+    response.set_cookie(CSRF_COOKIE, token, **csrf_kw)
     return token
 
 
@@ -297,10 +331,11 @@ def verify_csrf(request: Request) -> None:
         return
     header = request.headers.get(CSRF_HEADER, "")
     cookie = request.cookies.get(CSRF_COOKIE, "")
-    if not header or not cookie:
-        raise HTTPException(status_code=403, detail="csrf validation failed")
-    if not hmac.compare_digest(header, cookie):
-        raise HTTPException(status_code=403, detail="csrf validation failed")
+    if header and cookie and hmac.compare_digest(header, cookie):
+        return
+    if header and _verify_signed_csrf(header):
+        return
+    raise HTTPException(status_code=403, detail="csrf validation failed")
 
 
 def apply_security_headers(response: Response, request: Request) -> None:

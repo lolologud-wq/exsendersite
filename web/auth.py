@@ -29,6 +29,25 @@ COOKIE_NAME = "site_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 
+def _cookie_domain() -> Optional[str]:
+    """Shared session across subdomains, e.g. .exsender.top for inviter."""
+    dom = os.getenv("SITE_COOKIE_DOMAIN", "").strip()
+    return dom or None
+
+
+def _cookie_kwargs() -> dict[str, Any]:
+    kw: dict[str, Any] = {
+        "httponly": True,
+        "samesite": "lax",
+        "secure": _cookie_secure(),
+        "path": "/",
+    }
+    dom = _cookie_domain()
+    if dom:
+        kw["domain"] = dom
+    return kw
+
+
 def _cookie_secure() -> bool:
     explicit = os.getenv("SITE_COOKIE_SECURE", "").strip().lower()
     if explicit in ("1", "true", "yes", "on"):
@@ -96,28 +115,12 @@ def check_credentials(login: str, password: str) -> bool:
 
 def issue_admin_cookie(response: Response, login: str, request: Any = None) -> None:
     token = _serializer.dumps({"u": login.strip(), "v": 1})
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        max_age=COOKIE_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        secure=_cookie_secure(),
-        path="/",
-    )
+    response.set_cookie(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, **_cookie_kwargs())
 
 
 def issue_user_cookie(response: Response, user_id: str, request: Any = None) -> None:
     token = _serializer.dumps({"uid": user_id, "v": 1})
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        max_age=COOKIE_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        secure=_cookie_secure(),
-        path="/",
-    )
+    response.set_cookie(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, **_cookie_kwargs())
 
 
 # Backwards-compat name still imported by app.py.
@@ -126,7 +129,13 @@ def issue_cookie(response: Response) -> None:
 
 
 def clear_cookie(response: Response) -> None:
-    response.delete_cookie(COOKIE_NAME, secure=_cookie_secure(), path="/")
+    kw = _cookie_kwargs()
+    response.delete_cookie(
+        COOKIE_NAME,
+        path=kw.get("path", "/"),
+        secure=kw.get("secure", False),
+        domain=kw.get("domain"),
+    )
 
 
 def _decode(token: Optional[str]) -> Optional[dict[str, Any]]:

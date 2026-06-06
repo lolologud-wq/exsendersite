@@ -143,25 +143,37 @@ def parse_tme_post_link(text: str) -> tuple[str | int, int] | None:
     return None
 
 
-async def resolve_tme_post_for_forward(
-    client: TelegramClient, text: str
+async def _resolve_post_peer_id(
+    client: TelegramClient, peer_spec: str | int
+) -> int | None:
+    if isinstance(peer_spec, int):
+        return int(peer_spec)
+    try:
+        ent = await client.get_entity(peer_spec)
+    except Exception as e:
+        logger.warning("get_entity для ссылки на пост (%s): %s", peer_spec, e)
+        return None
+    return int(utils.get_peer_id(ent))
+
+
+async def resolve_tme_post_ids(
+    client: TelegramClient,
+    text: str,
+    *,
+    verify_message: bool = True,
 ) -> tuple[int, int] | None:
-    """Проверяет ссылку и доступ; возвращает (peer_id, message_id) для state."""
+    """Возвращает (peer_id, message_id). verify_message=False — только peer, быстрее."""
     if not client.is_connected():
         return None
     raw = parse_tme_post_link(text)
     if not raw:
         return None
     peer_spec, mid = raw
-    if isinstance(peer_spec, str):
-        try:
-            ent = await client.get_entity(peer_spec)
-        except Exception as e:
-            logger.warning("get_entity для ссылки на пост (%s): %s", peer_spec, e)
-            return None
-        pid = int(utils.get_peer_id(ent))
-    else:
-        pid = int(peer_spec)
+    pid = await _resolve_post_peer_id(client, peer_spec)
+    if pid is None:
+        return None
+    if not verify_message:
+        return pid, int(mid)
     try:
         got = await client.get_messages(pid, ids=mid)
     except Exception as e:
@@ -173,4 +185,11 @@ async def resolve_tme_post_for_forward(
         m = got
     if m is None:
         return None
-    return pid, mid
+    return pid, int(mid)
+
+
+async def resolve_tme_post_for_forward(
+    client: TelegramClient, text: str
+) -> tuple[int, int] | None:
+    """Проверяет ссылку и доступ; возвращает (peer_id, message_id) для state."""
+    return await resolve_tme_post_ids(client, text, verify_message=True)

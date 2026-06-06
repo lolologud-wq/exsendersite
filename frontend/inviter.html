@@ -5,91 +5,391 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#050505" />
   <title>exsender · Inviter</title>
+  <base href="/" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/profile.css" />
-  <link rel="stylesheet" href="css/admin.css" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css?v=20260606inv3" />
+  <link rel="stylesheet" href="css/inviter.css?v=20260606vis4" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260528mob3" />
 </head>
-<body class="pf-body adm-body">
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="logo">
+        <span class="logo-mark">e</span>
+        <span class="logo-text">inviter</span>
+      </div>
 
-<header class="pf-topbar">
-  <div class="pf-container pf-topbar-inner">
-    <a href="/" class="pf-brand">
-      <span class="logo-mark">e</span>
-      <span>exsender inviter</span>
-    </a>
-    <nav class="pf-topnav">
-      <a href="/inviter" class="active">Inviter</a>
-      <a href="/admin">Админ</a>
-      <a href="/app">Панель</a>
-    </nav>
-    <div class="pf-top-actions">
-      <span class="pf-user" id="invUser">—</span>
-      <button class="btn-ghost" id="invLogoutBtn">Выйти</button>
+      <nav class="nav" id="invNav">
+        <a href="#" class="nav-item active" data-page="dashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="3" width="7" height="9" rx="1.5"/>
+            <rect x="14" y="3" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="12" width="7" height="9" rx="1.5"/>
+            <rect x="3" y="16" width="7" height="5" rx="1.5"/>
+          </svg>
+          <span>Дашборд</span>
+        </a>
+        <a href="#" class="nav-item" data-page="parse">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M21 21l-4.35-4.35"/>
+            <path d="M8 11h6M11 8v6"/>
+          </svg>
+          <span>Парс</span>
+        </a>
+        <a href="#" class="nav-item" data-page="invite">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M19 8v6M22 11h-6"/>
+          </svg>
+          <span>Инвайт</span>
+        </a>
+        <a href="#" class="nav-item" data-page="accounts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="9" cy="8" r="3.2"/>
+            <path d="M2.8 20c.6-3.4 3.1-5.4 6.2-5.4S14.6 16.6 15.2 20"/>
+            <circle cx="17.5" cy="8.5" r="2.5"/>
+            <path d="M16 14.5c2.6.2 4.6 1.7 5.2 4.5"/>
+          </svg>
+          <span>Аккаунты</span>
+        </a>
+        <a href="#" class="nav-item" data-page="servers">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="3" width="18" height="7" rx="2"/>
+            <rect x="3" y="14" width="18" height="7" rx="2"/>
+            <circle cx="7" cy="6.5" r="0.8" fill="currentColor"/>
+            <circle cx="7" cy="17.5" r="0.8" fill="currentColor"/>
+          </svg>
+          <span>Серверы</span>
+        </a>
+      </nav>
+
+      <div class="status-card" id="invStatusCard">
+        <div class="status-row">
+          <span class="dot-led" id="invStatusDot"></span>
+          <span class="status-title">Аккаунт</span>
+        </div>
+        <div class="status-value" id="invStatusSlot">—</div>
+        <div class="status-meta" id="invStatusMeta">Выбери VDS и слот</div>
+      </div>
+
+      <div class="nav nav-bottom">
+        <a href="https://exsender.top/app" class="nav-item" id="navSender">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+            <path d="M10 17l5-5-5-5"/>
+            <path d="M15 12H3"/>
+          </svg>
+          <span>exsender</span>
+        </a>
+        <a href="https://github.com/exbrute/exinviter" class="nav-item" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+        <div class="inv-sidebar-user">
+          <span id="invUser">—</span>
+          <button type="button" class="btn-ghost" id="invLogoutBtn">Выйти</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="sidebar-backdrop" id="sidebarBackdrop" hidden aria-hidden="true"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button type="button" class="icon-btn menu-btn" id="menuBtn" aria-label="Меню" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M4 7h16M4 12h16M4 17h16"/>
+            </svg>
+          </button>
+          <div class="topbar-titles">
+            <div class="sub" id="invTopSub">EX Inviter</div>
+            <h1 id="invTopTitle">Дашборд</h1>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <div class="topbar-actions">
+            <span class="chip off" id="invParseChip" data-view-only="dashboard,parse,invite">parse idle</span>
+            <span class="chip off" id="invJobChip" data-view-only="dashboard,invite">invite idle</span>
+            <button type="button" class="btn-primary" id="invAddServerBtn" data-view-only="servers" hidden>+ VDS</button>
+            <button type="button" class="btn-primary" id="invAddAccountBtn" data-view-only="accounts" hidden>+ Аккаунт</button>
+            <button type="button" class="btn-ghost" id="invRefreshBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                <path d="M21 3v6h-6"/>
+              </svg>
+              Обновить
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div class="inv-alerts">
+        <div class="inv-alert inv-alert-err" id="invAlert" hidden></div>
+        <div class="inv-alert inv-alert-ok" id="invOk" hidden></div>
+      </div>
+
+      <!-- shared bot/account picker -->
+      <section class="card inv-picker-card" data-view="dashboard,parse,invite">
+        <div class="card-head"><h3>Бот и аккаунт</h3></div>
+        <div class="form-grid">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">VDS</span>
+              <select class="input" id="invBotSelect">
+                <option value="">— выбери VDS —</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Слот аккаунта</span>
+              <select class="input" id="invAccountSelect">
+                <option value="">— слот —</option>
+              </select>
+            </label>
+          </div>
+          <p class="field-hint inv-slot-hint" id="invSlotHint">Можно использовать VDS и аккаунты из exsender</p>
+        </div>
+      </section>
+
+      <!-- DASHBOARD -->
+      <div data-view="dashboard">
+        <div class="stats-grid inv-stats">
+          <article class="stat-card">
+            <span class="stat-label">Очередь</span>
+            <span class="stat-value" id="invStatQueue">—</span>
+            <span class="stat-sub">пользователей к инвайту</span>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Парсилось чатов</span>
+            <span class="stat-value" id="invStatParsed">—</span>
+            <span class="stat-sub">источников в базе</span>
+          </article>
+          <article class="stat-card highlight">
+            <span class="stat-label">Target чат</span>
+            <span class="stat-value sm" id="invStatTarget">—</span>
+            <span class="stat-sub" id="invStatTargetSub">не выбран</span>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Прогресс инвайта</span>
+            <span class="stat-value" id="invStatProgress">—</span>
+            <span class="stat-sub" id="invStatProgressSub">ожидание запуска</span>
+          </article>
+        </div>
+
+        <div class="inv-activity-grid">
+          <article class="card inv-activity-card" id="invDashParseCard">
+            <div class="inv-activity-head">
+              <div>
+                <h3>Парс</h3>
+                <p class="inv-activity-sub" id="invDashParseSub">Нет активного парса</p>
+              </div>
+              <span class="chip off" id="invDashParseChip">idle</span>
+            </div>
+            <div class="inv-task-panel" id="invDashParseLog"></div>
+            <button type="button" class="btn-ghost inv-dash-link" data-goto="parse">Открыть парс →</button>
+          </article>
+
+          <article class="card inv-activity-card" id="invDashInviteCard">
+            <div class="inv-activity-head">
+              <div>
+                <h3>Инвайт</h3>
+                <p class="inv-activity-sub" id="invDashInviteSub">Job не запущен</p>
+              </div>
+              <span class="chip off" id="invDashInviteChip">idle</span>
+            </div>
+            <div class="inv-task-panel" id="invDashInviteLog"></div>
+            <button type="button" class="btn-ghost inv-dash-link" data-goto="invite">Открыть инвайт →</button>
+          </article>
+        </div>
+      </div>
+
+      <!-- PARSE -->
+      <div data-view="parse" hidden>
+        <section class="card inv-card-wide">
+          <div class="card-head"><h3>Парс источника</h3></div>
+          <div class="form-grid">
+            <label class="field">
+              <span class="field-label">Ссылка на чат</span>
+              <input class="input mono" id="invSourceRef" placeholder="@chat или https://t.me/chat" />
+            </label>
+            <div class="inv-actions">
+              <label class="check">
+                <input type="checkbox" id="invParseForce" />
+                Парсить повторно
+              </label>
+              <button type="button" class="btn-primary inv-actions-end" id="invParseBtn">Парсить</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card inv-card-wide inv-parse-status" id="invParseStatusCard">
+          <div class="inv-activity-head">
+            <div>
+              <h3>Статус парса</h3>
+              <p class="inv-activity-sub" id="invParseStatusSub">Ожидание запуска</p>
+            </div>
+            <span class="chip off" id="invParseStatusChip">idle</span>
+          </div>
+          <div class="inv-task-panel" id="invParseLog"></div>
+        </section>
+      </div>
+
+      <!-- INVITE -->
+      <div data-view="invite" hidden>
+        <div class="inv-grid">
+          <section class="card">
+            <div class="card-head"><h3>Target чат</h3></div>
+            <div class="form-grid">
+              <label class="field">
+                <span class="field-label">Куда инвайтить</span>
+                <input class="input mono" id="invTargetRef" placeholder="@target или ссылка" />
+              </label>
+              <label class="field">
+                <span class="field-label">Из списка чатов</span>
+                <select class="input" id="invDialogSelect">
+                  <option value="">— из списка чатов —</option>
+                </select>
+              </label>
+              <div class="inv-actions">
+                <button type="button" class="btn-primary" id="invTargetBtn">Сохранить target</button>
+                <button type="button" class="btn-ghost" id="invDialogsBtn">Обновить чаты</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="card inv-card-wide">
+            <div class="card-head">
+              <h3>Запуск инвайта</h3>
+              <div class="card-actions">
+                <button type="button" class="btn-primary" id="invRunBtn">Запуск</button>
+                <button type="button" class="btn-ghost" id="invStopBtn">Стоп</button>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">Лимит <em>0 = все</em></span>
+                  <input class="input" id="invLimit" type="number" min="0" placeholder="0" />
+                </label>
+                <label class="field">
+                  <span class="field-label">Задержка, сек</span>
+                  <input class="input" id="invDelay" type="number" min="0" step="0.1" value="3" />
+                </label>
+              </div>
+              <div class="inv-task-panel" id="invJobLog"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ACCOUNTS -->
+      <div data-view="accounts" hidden>
+        <section class="card table-card">
+          <div class="card-head">
+            <h3>Аккаунты</h3>
+            <div class="card-actions">
+              <select class="input" id="invAccountsBotFilter" style="min-width:160px;">
+                <option value="">Все VDS</option>
+              </select>
+              <span class="chip" id="invAccountsCount">0</span>
+            </div>
+          </div>
+          <div class="table-wrap table-cards">
+            <table class="purchases">
+              <thead>
+                <tr>
+                  <th>VDS</th>
+                  <th>Источник</th>
+                  <th>Слот</th>
+                  <th>Статус</th>
+                  <th>Прокси</th>
+                  <th class="th-actions">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="invAccountsBody"></tbody>
+            </table>
+          </div>
+        </section>
+        <div class="callout" style="margin-top:14px;">
+          <b>Заимствование из exsender.</b> Аккаунты с VDS exsender доступны для парса и инвайта. Управлять ими можно в основной панели. Свои inviter-аккаунты добавляй кнопкой «+ Аккаунт».
+        </div>
+      </div>
+
+      <!-- SERVERS -->
+      <div data-view="servers" hidden>
+        <section class="card table-card">
+          <div class="card-head">
+            <h3>Inviter VDS</h3>
+            <div class="card-actions">
+              <span class="chip" id="invServersCount">0</span>
+            </div>
+          </div>
+          <div class="table-wrap table-cards">
+            <table class="purchases">
+              <thead>
+                <tr>
+                  <th>Сервер</th>
+                  <th>Статус</th>
+                  <th>Установлен в</th>
+                  <th>Деплой</th>
+                  <th>Авто-перезапуск</th>
+                  <th class="th-actions">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="invServersBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card table-card" style="margin-top:20px;">
+          <div class="card-head">
+            <h3>Из exsender</h3>
+            <div class="card-actions">
+              <span class="chip" id="invBorrowedCount">0</span>
+            </div>
+          </div>
+          <div class="table-wrap table-cards">
+            <table class="purchases">
+              <thead>
+                <tr>
+                  <th>Сервер</th>
+                  <th>Статус</th>
+                  <th>Host</th>
+                  <th class="th-actions">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="invBorrowedBody"></tbody>
+            </table>
+          </div>
+        </section>
+        <div class="callout" style="margin-top:14px;">
+          <b>Два типа VDS.</b> Inviter VDS — только здесь. VDS из exsender можно использовать для парса и инвайта без отдельного деплоя.
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal-root" id="invModalRoot" hidden>
+    <div class="modal-backdrop" data-inv-modal-close></div>
+    <div class="modal-panel" id="invModalPanel">
+      <div class="modal-head">
+        <h3 id="invModalTitle">—</h3>
+        <button type="button" class="icon-btn" data-inv-modal-close aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" id="invModalBody"></div>
+      <div class="modal-foot" id="invModalFoot"></div>
     </div>
   </div>
-</header>
 
-<main class="pf-main">
-  <div class="pf-container adm-container">
-    <div class="adm-head">
-      <div>
-        <div class="pf-eyebrow">EX Inviter</div>
-        <h1 class="adm-title">Парс и инвайт</h1>
-      </div>
-      <button class="btn-ghost" id="invRefreshBtn">↻ Обновить</button>
-    </div>
-
-    <section class="adm-alert" id="invAlert" hidden></section>
-    <section class="adm-alert adm-alert-ok" id="invOk" hidden></section>
-
-    <section class="pf-section adm-tools">
-      <h2 class="pf-h2">Бот и аккаунт</h2>
-      <div class="adm-form">
-        <select class="input" id="invBotSelect"><option value="">— выбери VDS бота —</option></select>
-        <select class="input" id="invAccountSelect"><option value="">— слот аккаунта —</option></select>
-      </div>
-      <div class="adm-mini-stats" id="invOverview">Выбери бота и слот</div>
-    </section>
-
-    <section class="pf-section adm-tools">
-      <h2 class="pf-h2">Парс источника</h2>
-      <div class="adm-form">
-        <input class="input" id="invSourceRef" placeholder="@chat или https://t.me/chat" />
-        <label class="adm-check"><input type="checkbox" id="invParseForce" /> Парсить повторно</label>
-        <button class="btn-primary" id="invParseBtn">Парсить</button>
-      </div>
-    </section>
-
-    <section class="pf-section adm-tools">
-      <h2 class="pf-h2">Target чат</h2>
-      <div class="adm-form">
-        <input class="input" id="invTargetRef" placeholder="@target или ссылка" />
-        <button class="btn-primary" id="invTargetBtn">Сохранить target</button>
-      </div>
-      <div class="adm-form">
-        <select class="input" id="invDialogSelect"><option value="">— из списка чатов —</option></select>
-        <button class="btn-ghost" id="invDialogsBtn">Обновить чаты</button>
-      </div>
-    </section>
-
-    <section class="pf-section adm-tools">
-      <h2 class="pf-h2">Запуск</h2>
-      <div class="adm-form">
-        <input class="input" id="invLimit" type="number" min="0" placeholder="limit (0 = все)" />
-        <input class="input" id="invDelay" type="number" min="0" step="0.1" value="3" placeholder="delay сек" />
-        <button class="btn-primary" id="invRunBtn">Запуск</button>
-        <button class="btn-ghost" id="invStopBtn">Стоп</button>
-      </div>
-      <pre class="adm-log" id="invJobLog">job: idle</pre>
-    </section>
-  </div>
-</main>
-
-<script src="js/http.js"></script>
-<script src="js/inviter.js"></script>
+  <script src="js/http.js?v=20260606csrf2"></script>
+  <script src="js/inviter.js?v=20260606pub1"></script>
 </body>
 </html>
