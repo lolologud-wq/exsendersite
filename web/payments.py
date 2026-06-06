@@ -71,6 +71,11 @@ class InvoiceRecord:
     referral_credit_usd: float = 0.0
 
 
+def is_paid_with_real_money(inv: InvoiceRecord) -> bool:
+    """Paid invoice with crypto/fiat charge (excludes 100% referral-balance checkout)."""
+    return inv.status == "paid" and float(inv.amount_usd or 0) > 0
+
+
 class InvoiceStore:
     def __init__(self, path: Path = INVOICES_FILE) -> None:
         self.path = path

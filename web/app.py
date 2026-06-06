@@ -526,23 +526,28 @@ def create_app() -> FastAPI:
         all_invoices = invoices.list_all()
 
         paid = [i for i in all_invoices if i.status == "paid"]
+        paid_real = [i for i in paid if payments.is_paid_with_real_money(i)]
         pending = [i for i in all_invoices if i.status in ("active", "pending")]
-        revenue_total = sum(i.amount_usd for i in paid)
-        revenue_month = sum(i.amount_usd for i in paid if i.paid_at >= month_start)
+        revenue_total = sum(i.amount_usd for i in paid_real)
+        revenue_month = sum(
+            i.amount_usd for i in paid_real if i.paid_at >= month_start
+        )
 
         by_plan: dict[str, int] = {}
-        for inv in paid:
+        for inv in paid_real:
             by_plan[inv.plan] = by_plan.get(inv.plan, 0) + 1
 
         email_by_id = {u.id: u.email for u in all_users}
-        recent_payments = sorted(paid, key=lambda x: x.paid_at or x.created_at, reverse=True)[:25]
+        recent_payments = sorted(
+            paid_real, key=lambda x: x.paid_at or x.created_at, reverse=True
+        )[:25]
         recent_users = sorted(all_users, key=lambda u: u.created_at, reverse=True)[:25]
 
         return {
             "usersTotal": len(all_users),
             "usersActiveSub": sum(1 for u in all_users if u.plan_expires_at > now),
             "usersRegisteredMonth": sum(1 for u in all_users if u.created_at >= month_start),
-            "invoicesPaid": len(paid),
+            "invoicesPaid": len(paid_real),
             "invoicesPending": len(pending),
             "revenueTotalUsd": round(revenue_total, 2),
             "revenueMonthUsd": round(revenue_month, 2),
@@ -560,7 +565,7 @@ def create_app() -> FastAPI:
                 for i in recent_payments
             ],
             "recentUsers": [],
-            "revenueChart": admin_ops.revenue_by_day(paid, days=30),
+            "revenueChart": admin_ops.revenue_by_day(paid_real, days=30),
             "promos": [p.public() for p in promos.list_all()],
             "auditLog": [
                 {
@@ -708,8 +713,10 @@ def create_app() -> FastAPI:
     @app.get("/api/admin/revenue-chart")
     async def admin_revenue_chart(request: Request, days: int = 30):
         _admin_guard(request)
-        paid = [i for i in invoices.list_all() if i.status == "paid"]
-        return {"days": days, "points": admin_ops.revenue_by_day(paid, days=days)}
+        paid_real = [
+            i for i in invoices.list_all() if payments.is_paid_with_real_money(i)
+        ]
+        return {"days": days, "points": admin_ops.revenue_by_day(paid_real, days=days)}
 
     @app.get("/api/admin/promos")
     async def admin_list_promos(request: Request):
