@@ -11,6 +11,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css?v=20260606inv3" />
   <link rel="stylesheet" href="css/inviter.css?v=20260606vis4" />
+  <link rel="stylesheet" href="css/onboarding.css?v=20260608ob1" />
   <link rel="stylesheet" href="css/mobile.css?v=20260528mob3" />
 </head>
 <body>
@@ -64,6 +65,15 @@
             <circle cx="7" cy="17.5" r="0.8" fill="currentColor"/>
           </svg>
           <span>Серверы</span>
+        </a>
+        <a href="/profile" class="nav-item" id="invNavProfile" data-onboard="profile">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="3.2"/>
+            <path d="M5 20c.8-3.6 3.4-5.5 7-5.5s6.2 1.9 7 5.5"/>
+            <rect x="16" y="3" width="5" height="5" rx="1"/>
+            <path d="M18.5 5.5h0"/>
+          </svg>
+          <span>Профиль</span>
         </a>
       </nav>
 
@@ -125,12 +135,13 @@
       </header>
 
       <div class="inv-alerts">
+        <div id="invNotifyHost"></div>
         <div class="inv-alert inv-alert-err" id="invAlert" hidden></div>
         <div class="inv-alert inv-alert-ok" id="invOk" hidden></div>
       </div>
 
       <!-- shared bot/account picker -->
-      <section class="card inv-picker-card" data-view="dashboard,parse,invite">
+      <section class="card inv-picker-card" data-view="dashboard,parse,invite" id="invPickerCard">
         <div class="card-head"><h3>Бот и аккаунт</h3></div>
         <div class="form-grid">
           <div class="field-row">
@@ -383,7 +394,9 @@
     </div>
   </div>
 
-  <script src="js/http.js?v=20260606csrf2"></script>
-  <script src="js/inviter.js?v=20260606pub1"></script>
+  <script src="js/http.js?v=20260606csrf2" defer></script>
+  <script src="js/impersonation.js?v=20260608imp1" defer></script>
+  <script src="js/onboarding.js?v=20260608ob1" defer></script>
+  <script src="js/inviter.js?v=20260608inv1" defer></script>
 </body>
 </html>

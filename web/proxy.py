@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,14 +26,35 @@ DEPLOY_KEY = WEB_DIR / "deploy_key"
 
 DEFAULT_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 DIRECT_TIMEOUT = httpx.Timeout(6.0, connect=3.0)
-HEALTH_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
+HEALTH_TIMEOUT = httpx.Timeout(12.0, connect=6.0)
 OVERVIEW_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-HEALTH_OK_CACHE_TTL = 30.0
-HEALTH_FAIL_CACHE_TTL = 8.0
+HEALTH_OK_CACHE_TTL = 45.0
+HEALTH_FAIL_CACHE_TTL = 20.0
+HEALTH_STALE_OK_SEC = 120.0
+HEALTH_OFFLINE_AFTER_FAILS = 3
 OVERVIEW_CACHE_TTL = 6.0
+SSH_TUNNEL_RETRIES = 3
 
 _health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+@dataclass
+class _HealthTrack:
+    reachable: bool = True
+    last_ok_at: float = 0.0
+    last_fail_at: float = 0.0
+    consecutive_fails: int = 0
+    last_error: str = ""
+
+
+_health_track: dict[str, _HealthTrack] = {}
+
+
+def _track(rec_id: str) -> _HealthTrack:
+    if rec_id not in _health_track:
+        _health_track[rec_id] = _HealthTrack()
+    return _health_track[rec_id]
 
 
 def health_cache_ttl(result: dict[str, Any]) -> float:
@@ -48,6 +70,66 @@ def cached_health(rec_id: str) -> dict[str, Any] | None:
     if time.time() - ts < health_cache_ttl(result):
         return result
     return None
+
+
+def _stale_health_view(rec_id: str) -> dict[str, Any] | None:
+    """Gracefully serve last-known-good while revalidating."""
+    cached = _health_cache.get(rec_id)
+    tr = _track(rec_id)
+    now = time.time()
+    if tr.last_ok_at and now - tr.last_ok_at < HEALTH_STALE_OK_SEC:
+        err = tr.last_error if tr.consecutive_fails >= HEALTH_OFFLINE_AFTER_FAILS else ""
+        return {"reachable": True, "stale": True, "error": err}
+    if cached:
+        ts, result = cached
+        if result.get("reachable") and now - ts < HEALTH_STALE_OK_SEC:
+            return {**result, "stale": True}
+    return None
+
+
+def _record_health_success(rec_id: str) -> dict[str, Any]:
+    tr = _track(rec_id)
+    now = time.time()
+    tr.reachable = True
+    tr.last_ok_at = now
+    tr.consecutive_fails = 0
+    tr.last_error = ""
+    result = {"reachable": True}
+    _health_cache[rec_id] = (now, result)
+    return result
+
+
+def _record_health_failure(rec_id: str, err: str) -> dict[str, Any]:
+    tr = _track(rec_id)
+    now = time.time()
+    tr.consecutive_fails += 1
+    tr.last_fail_at = now
+    tr.last_error = err[:200]
+    still_ok = (
+        tr.last_ok_at > 0
+        and now - tr.last_ok_at < HEALTH_STALE_OK_SEC
+        and tr.consecutive_fails < HEALTH_OFFLINE_AFTER_FAILS
+    )
+    if still_ok:
+        tr.reachable = True
+        result = {"reachable": True, "error": ""}
+    else:
+        tr.reachable = False
+        result = {"reachable": False, "error": tr.last_error}
+    _health_cache[rec_id] = (now, result)
+    return result
+
+
+def _ssh_tunnel_broken(exc: BaseException) -> bool:
+    if isinstance(exc, asyncssh.Error):
+        return True
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, httpx.ConnectError):
+        return True
+    if isinstance(exc, httpx.ConnectTimeout):
+        return True
+    return False
 
 
 def _headers(rec: BotRecord, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -79,7 +161,11 @@ class _TunnelEntry:
 
     def alive(self) -> bool:
         try:
-            return not self.conn.is_closed()
+            if self.conn.is_closed():
+                return False
+            with socket.create_connection(("127.0.0.1", self.port), timeout=0.4):
+                pass
+            return True
         except Exception:
             return False
 
@@ -131,9 +217,9 @@ class _TunnelPool:
             username=rec.ssh_user,
             client_keys=[str(DEPLOY_KEY)],
             known_hosts=None,
-            connect_timeout=12,
-            keepalive_interval=30,
-            keepalive_count_max=4,
+            connect_timeout=15,
+            keepalive_interval=20,
+            keepalive_count_max=6,
         )
         listener = await conn.forward_local_port("", 0, "127.0.0.1", rec.api_port)
         return _TunnelEntry(conn, listener, listener.get_port(), rec.api_port)
@@ -182,7 +268,7 @@ async def _request_via_ssh(
     content: bytes | None = None,
 ) -> httpx.Response:
     last_err: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(SSH_TUNNEL_RETRIES):
         try:
             local_port = await _pool.port_for(rec)
             return await _httpx_call(
@@ -197,10 +283,19 @@ async def _request_via_ssh(
                 data=data,
                 content=content,
             )
-        except (asyncssh.Error, OSError, httpx.HTTPError) as e:
+        except Exception as e:
             last_err = e
-            logger.warning("SSH tunnel attempt %s for %s failed: %s", attempt + 1, rec.host, e)
-            await _pool.invalidate(rec.id)
+            logger.warning(
+                "SSH tunnel attempt %s/%s for %s failed: %s",
+                attempt + 1,
+                SSH_TUNNEL_RETRIES,
+                rec.host,
+                e,
+            )
+            if _ssh_tunnel_broken(e):
+                await _pool.invalidate(rec.id)
+            if attempt + 1 < SSH_TUNNEL_RETRIES:
+                await asyncio.sleep(0.35 * (attempt + 1))
     raise RuntimeError(
         f"бот недоступен через SSH ({last_err}). Проверь: systemctl status userbot на {rec.host}"
     ) from last_err
@@ -272,14 +367,22 @@ async def healthcheck(rec: BotRecord) -> dict:
     if fresh is not None:
         return fresh
 
+    stale = _stale_health_view(rec.id)
     try:
         r = await bot_request(rec, "GET", "/health", timeout=HEALTH_TIMEOUT)
-        result = {"reachable": r.status_code == 200, "status": r.status_code}
+        if r.status_code == 200:
+            return _record_health_success(rec.id)
+        err = f"health HTTP {r.status_code}"
+        if stale and stale.get("reachable"):
+            _record_health_failure(rec.id, err)
+            return stale
+        return _record_health_failure(rec.id, err)
     except Exception as e:
-        result = {"reachable": False, "error": str(e)}
-
-    _health_cache[rec.id] = (time.time(), result)
-    return result
+        err = str(e)
+        if stale and stale.get("reachable"):
+            _record_health_failure(rec.id, err)
+            return stale
+        return _record_health_failure(rec.id, err)
 
 
 async def refresh_health_background(bots: list[BotRecord]) -> None:
@@ -345,21 +448,32 @@ async def refresh_overviews_live(bots: list[BotRecord], *, force: bool = True) -
 
 def invalidate_overview_cache(bot_id: str) -> None:
     _overview_cache.pop(bot_id, None)
+    try:
+        from overview_cache import invalidate as invalidate_disk_overview_cache
+
+        invalidate_disk_overview_cache(bot_id)
+    except Exception:
+        pass
 
 
 def apply_health_to_item(item: dict[str, Any], rec: BotRecord) -> bool:
     """Fill reachable from cache; return True if background refresh is needed."""
-    cached = _health_cache.get(rec.id)
     fresh = cached_health(rec.id)
     if fresh is not None:
         item["reachable"] = bool(fresh.get("reachable"))
         if fresh.get("error"):
             item["lastError"] = str(fresh["error"])[:200]
         return False
-    if cached:
-        item["reachable"] = bool(cached[1].get("reachable"))
-        if cached[1].get("error"):
-            item["lastError"] = str(cached[1]["error"])[:200]
-    else:
-        item["reachable"] = True
+
+    stale = _stale_health_view(rec.id)
+    if stale is not None:
+        item["reachable"] = bool(stale.get("reachable"))
+        if stale.get("error") and not stale.get("reachable"):
+            item["lastError"] = str(stale["error"])[:200]
+        return True
+
+    tr = _track(rec.id)
+    item["reachable"] = tr.reachable if tr.last_ok_at or tr.last_fail_at else True
+    if not item["reachable"] and tr.last_error:
+        item["lastError"] = tr.last_error[:200]
     return True

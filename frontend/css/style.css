@@ -44,6 +44,16 @@ input  { font-family: inherit; outline: none; }
 a      { color: inherit; text-decoration: none; }
 svg    { width: 18px; height: 18px; flex-shrink: 0; }
 
+/* ===== Accessibility: visible keyboard focus ===== */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* Brighter, more readable input hints */
+input::placeholder, textarea::placeholder { color: var(--text-dim); opacity: 0.75; }
+
+/* Firefox scrollbar parity with the webkit styling used across the app */
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+
 /* ===== App layout ===== */
 .app {
   display: grid;
@@ -367,6 +377,10 @@ svg    { width: 18px; height: 18px; flex-shrink: 0; }
   transition: transform .2s, border-color .2s;
 }
 .stat-card:hover { transform: translateY(-2px); border-color: var(--line-2); }
+/* Avoid sticky hover lift / jank on touch devices */
+@media (hover: none) {
+  .stat-card:hover, .btn-primary:hover, .btn-danger:hover { transform: none; }
+}
 
 .stat-card.highlight {
   background: linear-gradient(135deg, #f5f5f5 0%, #d4d4d4 100%);

@@ -169,6 +169,7 @@
       <h2 class="pf-h2">Changelog</h2>
       <p class="pf-sub">Публикация записей на <a href="/changelog">/changelog</a>. Теги через запятую.</p>
       <form class="adm-form adm-form-col" id="admChangelogForm">
+        <input type="hidden" id="clEditId" value="" />
         <div class="adm-form-row">
           <input class="input" id="clVersion" placeholder="Версия (1.3.1)" />
           <input class="input" id="clDate" placeholder="Дата YYYY-MM-DD" />
@@ -176,12 +177,13 @@
         <input class="input" id="clTitle" placeholder="Заголовок" required />
         <input class="input" id="clTags" placeholder="Теги: feature, billing" />
         <textarea class="input" id="clBody" rows="5" placeholder="Текст записи…" required></textarea>
-        <button type="submit" class="btn-primary">Опубликовать</button>
+        <button type="submit" class="btn-primary" id="clSubmitBtn">Опубликовать</button>
+        <button type="button" class="btn-ghost" id="clCancelEdit" hidden>Отмена редактирования</button>
       </form>
       <div class="adm-table-wrap adm-mt">
         <table class="adm-table">
-          <thead><tr><th>Дата</th><th>Версия</th><th>Заголовок</th></tr></thead>
-          <tbody id="admChangelogBody"><tr><td colspan="3" class="adm-empty">—</td></tr></tbody>
+          <thead><tr><th>Дата</th><th>Версия</th><th>Заголовок</th><th></th></tr></thead>
+          <tbody id="admChangelogBody"><tr><td colspan="4" class="adm-empty">—</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -199,8 +201,8 @@
   </div>
 </main>
 
-  <script src="js/http.js"></script>
-  <script src="js/pf-nav.js"></script>
-  <script src="js/admin.js?v=20260606usage"></script>
+  <script src="js/http.js" defer></script>
+  <script src="js/pf-nav.js" defer></script>
+  <script src="js/admin.js?v=20260608imp2" defer></script>
 </body>
 </html>

@@ -42,7 +42,7 @@ def _save(data: dict[str, Any]) -> None:
 
 def _prune(buckets: dict[str, int]) -> dict[str, int]:
     cutoff = (datetime.now() - timedelta(days=MAX_BUCKETS_DAYS)).strftime("%Y%m%d%H")
-    return {k: int(v) for k, v in buckets.items() if k >= cutoff_key and int(v) > 0}
+    return {k: int(v) for k, v in buckets.items() if k >= cutoff and int(v) > 0}
 
 
 def record_send(account_key: str) -> None:

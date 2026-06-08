@@ -40,6 +40,7 @@ from auth import (
     current_identity,
     current_user_id,
     issue_admin_cookie,
+    issue_impersonation_cookie,
     issue_user_cookie,
     require_admin,
     require_login,
@@ -53,16 +54,19 @@ from proxy import (
     fetch_overview,
     fetch_overview_pack,
     get_json,
+    invalidate_overview_cache,
     refresh_health_background,
     refresh_overviews_live,
     request,
 )
 from registry import BotRecord, BotRegistry
 from register_verify import PendingRegistrationStore
+from password_reset import PasswordResetStore
 from users import PLANS, TRIAL_DAYS, UserStore, hash_password, plan_duration_seconds, plan_info
 from verify_bot import (
     VERIFY_BOT_TOKEN,
     bot_deep_link,
+    reset_deep_link,
     resolve_bot_username,
     start_verify_bot_background,
 )
@@ -81,6 +85,7 @@ notifications = admin_ops.NotificationStore()
 referral_ledger = referrals.ReferralLedger()
 changelog_store = changelog_mod.ChangelogStore()
 pending_regs = PendingRegistrationStore()
+password_resets = PasswordResetStore()
 
 INVITER_HOSTS = frozenset(
     h.strip().lower()
@@ -211,10 +216,10 @@ def create_app() -> FastAPI:
         if path == "/":
             return RedirectResponse("/inviter", status_code=302)
         static_ok = path.startswith(("/api/", "/css/", "/js/", "/img/", "/og/"))
-        inviter_ok = path in ("/inviter", "/login")
+        inviter_ok = path in ("/inviter", "/login", "/profile", "/forgot-password")
         if static_ok or inviter_ok:
             return await call_next(request)
-        if path in ("/app", "/admin", "/profile", "/register", "/changelog"):
+        if path in ("/app", "/admin", "/register", "/changelog"):
             return RedirectResponse(f"{SITE_PUBLIC_BASE}{path}", status_code=302)
         return await call_next(request)
 
@@ -226,7 +231,12 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_verify_bot() -> None:
-        start_verify_bot_background(pending_regs, users.telegram_taken)
+        start_verify_bot_background(
+            pending_regs,
+            users.telegram_taken,
+            password_reset=password_resets,
+            users_by_id=users.get,
+        )
 
     @app.on_event("startup")
     async def _warm_overview_cache() -> None:
@@ -266,6 +276,10 @@ def create_app() -> FastAPI:
         if ident["kind"] == "anon":
             return RedirectResponse("/login", status_code=303)
         return FileResponse(FRONTEND_DIR / "profile.html")
+
+    @app.get("/forgot-password", include_in_schema=False)
+    async def forgot_password_page(request: Request):
+        return FileResponse(FRONTEND_DIR / "forgot-password.html")
 
     @app.get("/changelog", include_in_schema=False)
     async def changelog_page(request: Request):
@@ -336,7 +350,15 @@ def create_app() -> FastAPI:
             return {"user": ident["user"], "kind": "admin", "csrf": csrf}
         if ident["kind"] == "user":
             rec = ident["record"]
-            return {"user": rec.email, "kind": "user", "profile": rec.public(), "csrf": csrf}
+            payload: dict[str, Any] = {
+                "user": rec.email,
+                "kind": "user",
+                "profile": rec.public(),
+                "csrf": csrf,
+            }
+            if ident.get("impersonated_by"):
+                payload["impersonatedBy"] = ident["impersonated_by"]
+            return payload
         return {"user": None, "csrf": csrf}
 
     def _resolve_referrer_id(body: dict[str, Any]) -> str:
@@ -453,6 +475,94 @@ def create_app() -> FastAPI:
         security.issue_csrf_token(response, request)
         return {"ok": True, "redirect": "/app", "user": user_rec.public()}
 
+    @app.post("/api/auth/password-reset/start")
+    async def password_reset_start(payload: dict[str, Any], request: Request):
+        if not VERIFY_BOT_TOKEN:
+            raise HTTPException(
+                status_code=503,
+                detail="Сброс через Telegram временно недоступен",
+            )
+        body = payload or {}
+        ip = security.client_ip(request)
+        if security.honeypot_triggered(body):
+            security.record_auth_failure(ip)
+            raise HTTPException(status_code=400, detail="bad request")
+
+        email = security.validate_email(str(body.get("email", "")))
+        rec = users.by_email(email)
+        if rec is None:
+            return {
+                "ok": True,
+                "message": "Если аккаунт с привязанным Telegram существует, откройте ссылку в боте.",
+            }
+        if rec.blocked:
+            return {
+                "ok": True,
+                "message": "Если аккаунт с привязанным Telegram существует, откройте ссылку в боте.",
+            }
+        if int(rec.telegram_user_id or 0) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="У этого аккаунта нет привязанного Telegram. Обратитесь в поддержку.",
+            )
+        pending = password_resets.create(user_id=rec.id, email=rec.email)
+        bot_username = ""
+        async with httpx.AsyncClient() as client:
+            bot_username = await resolve_bot_username(client)
+        bot_url = reset_deep_link(pending.token, bot_username)
+        if not bot_url:
+            raise HTTPException(status_code=503, detail="Бот подтверждения не настроен")
+        return {
+            "ok": True,
+            "token": pending.token,
+            "botUrl": bot_url,
+            "expiresAt": pending.expires_at,
+            "message": "Откройте Telegram и подтвердите сброс пароля.",
+        }
+
+    @app.get("/api/auth/password-reset/status")
+    async def password_reset_status(token: str = ""):
+        rec = password_resets.get(token)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        return {"ok": True, **rec.public_status()}
+
+    @app.post("/api/auth/password-reset/complete")
+    async def password_reset_complete(payload: dict[str, Any], request: Request):
+        body = payload or {}
+        token = str(body.get("token", "")).strip()
+        password = security.validate_password(str(body.get("password", "")))
+        rec = password_resets.get(token)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        if rec.completed:
+            raise HTTPException(status_code=409, detail="Пароль уже изменён")
+        if rec.is_expired():
+            raise HTTPException(
+                status_code=410,
+                detail="Время подтверждения истекло. Запросите сброс заново.",
+            )
+        if not rec.is_verified():
+            raise HTTPException(
+                status_code=400,
+                detail="Сначала подтвердите сброс в Telegram",
+            )
+        user_rec = users.set_password(rec.user_id, password)
+        if user_rec is None:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+        password_resets.mark_completed(token)
+        return {"ok": True, "message": "Пароль обновлён. Теперь можно войти."}
+
+    @app.post("/api/auth/impersonate/stop")
+    async def impersonate_stop(request: Request, response: Response):
+        ident = current_identity(request, users)
+        admin_login = ident.get("impersonated_by")
+        if not admin_login or ident.get("kind") != "user":
+            raise HTTPException(status_code=400, detail="Режим impersonation не активен")
+        issue_admin_cookie(response, admin_login, request)
+        security.issue_csrf_token(response, request)
+        return {"ok": True, "redirect": "/admin"}
+
     # ===================================================== profile / billing
     @app.get("/api/users/me", dependencies=[Depends(require_login)])
     async def get_me(request: Request):
@@ -488,7 +598,7 @@ def create_app() -> FastAPI:
             profile = rec.public()
             if usage:
                 profile = {**profile, "trialLimits": usage}
-            return {
+            user_payload: dict[str, Any] = {
                 "kind": "user",
                 "profile": profile,
                 "plans": plans_list,
@@ -507,6 +617,9 @@ def create_app() -> FastAPI:
                 },
                 "trialDays": TRIAL_DAYS,
             }
+            if ident.get("impersonated_by"):
+                user_payload["impersonatedBy"] = ident["impersonated_by"]
+            return user_payload
         return {
             "kind": "admin",
             "profile": {
@@ -710,6 +823,26 @@ def create_app() -> FastAPI:
         )
         return {"ok": True, "profile": rec.admin_view()}
 
+    @app.post("/api/admin/users/{user_id}/impersonate")
+    async def admin_impersonate_user(user_id: str, request: Request, response: Response):
+        user_id = security.validate_safe_id(user_id, name="user_id")
+        admin_login = _admin_guard(request)
+        rec = users.get(user_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if rec.blocked:
+            raise HTTPException(status_code=400, detail="Нельзя войти как заблокированный пользователь")
+        issue_impersonation_cookie(response, rec.id, admin_login, request)
+        security.issue_csrf_token(response, request)
+        audit.add(
+            admin_login,
+            "impersonate",
+            target=rec.email,
+            details={"userId": rec.id},
+        )
+        redirect = "/inviter" if _is_inviter_host(request) else "/app"
+        return {"ok": True, "redirect": redirect, "email": rec.email}
+
     @app.get("/api/admin/revenue-chart")
     async def admin_revenue_chart(request: Request, days: int = 30):
         _admin_guard(request)
@@ -841,6 +974,40 @@ def create_app() -> FastAPI:
             "changelog_create",
             target=entry.version,
             details={"title": entry.title},
+        )
+        return {"ok": True, "entry": entry.public()}
+
+    @app.patch("/api/admin/changelog/{entry_id}")
+    async def admin_changelog_update(
+        entry_id: str, payload: dict[str, Any], request: Request
+    ):
+        admin_login = _admin_guard(request)
+        entry_id = security.validate_safe_id(entry_id, name="changelog_id")
+        body = payload or {}
+        tags_raw = body.get("tags")
+        tags: list[str] | None = None
+        if tags_raw is not None:
+            if isinstance(tags_raw, str):
+                tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            elif isinstance(tags_raw, list):
+                tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+        try:
+            entry = changelog_store.update(
+                entry_id,
+                version=str(body["version"]).strip() if "version" in body else None,
+                title=str(body["title"]).strip() if "title" in body else None,
+                date=str(body["date"]).strip() if "date" in body else None,
+                body=str(body["body"]).strip() if "body" in body else None,
+                tags=tags,
+                published=bool(body["published"]) if "published" in body else None,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        audit.add(
+            admin_login,
+            "changelog_update",
+            target=entry.version,
+            details={"title": entry.title, "id": entry.id},
         )
         return {"ok": True, "entry": entry.public()}
 
@@ -1355,6 +1522,10 @@ def create_app() -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
+        if method.upper() in ("POST", "PATCH", "PUT", "DELETE") and r.status_code < 400:
+            invalidate_overview_cache(bid)
+            asyncio.create_task(refresh_overviews_live([rec], force=True))
+
         resp_headers = {
             k: v for k, v in r.headers.items()
             if k.lower() not in ("content-encoding", "transfer-encoding", "connection")
@@ -1430,7 +1601,7 @@ def create_app() -> FastAPI:
             if rec.blocked:
                 return RedirectResponse(f"{SITE_PUBLIC_BASE}/login", status_code=303)
             if rec.plan_expires_at <= time.time():
-                return RedirectResponse(f"{SITE_PUBLIC_BASE}/profile", status_code=303)
+                return RedirectResponse("/profile", status_code=303)
         return FileResponse(FRONTEND_DIR / "inviter.html")
 
     INVITER_PROXY_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
@@ -1649,6 +1820,12 @@ def create_app() -> FastAPI:
         if status != 200 or not isinstance(data, dict):
             raise HTTPException(status_code=502, detail="bot overview failed")
         return {"accounts": data.get("accounts") or []}
+
+    @app.post("/api/inviter/bots/{bid}/invite/stop")
+    async def inviter_invite_job_stop(bid: str, request: Request):
+        """Stop running invite job (not the VDS service — see /stop)."""
+        _, rec = _require_inviter_bot_access(request, bid)
+        return await _proxy_inviter_bot(rec, "POST", "stop", request, inviter_api=True)
 
     @app.api_route(
         "/api/inviter/bots/{bid}/{path:path}",

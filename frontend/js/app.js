@@ -5,6 +5,14 @@
 
 const FETCH_OPTS = { credentials: "same-origin", cache: "no-store" };
 
+// Safe localStorage wrapper: window.localStorage throws in private mode or
+// when storage is blocked, which otherwise breaks panel init on load.
+const LS = {
+  getItem(k) { try { return window.localStorage.getItem(k); } catch (_) { return null; } },
+  setItem(k, v) { try { window.localStorage.setItem(k, v); } catch (_) {} },
+  removeItem(k) { try { window.localStorage.removeItem(k); } catch (_) {} },
+};
+
 const EMPTY_OVERVIEW = {
   activeAccountId: null,
   totals: {
@@ -25,8 +33,8 @@ const STATE = {
   pollTimer: null,
   view: "dashboard",
   bots: [],
-  selectedBotId: localStorage.getItem("selectedBotId") || "",
-  dashboardBotId: localStorage.getItem("dashboardBotId") || "",
+  selectedBotId: LS.getItem("selectedBotId") || "",
+  dashboardBotId: LS.getItem("dashboardBotId") || "",
   accountsBotFilter: "",
   chatsBotFilter: "",
   chatsAccountFilter: "",
@@ -3550,8 +3558,8 @@ function renderBotSelects() {
     }).join("");
     dash.value = STATE.bots.some((b) => b.id === prev) ? prev : "";
     STATE.dashboardBotId = dash.value;
-    if (STATE.dashboardBotId) localStorage.setItem("dashboardBotId", STATE.dashboardBotId);
-    else localStorage.removeItem("dashboardBotId");
+    if (STATE.dashboardBotId) LS.setItem("dashboardBotId", STATE.dashboardBotId);
+    else LS.removeItem("dashboardBotId");
   }
 
   const accF = document.getElementById("accountsBotFilter");
@@ -3611,15 +3619,15 @@ async function loadBots({ force = false } = {}) {
   const ids = new Set(STATE.bots.map((b) => b.id));
   if (STATE.selectedBotId && !ids.has(STATE.selectedBotId)) {
     STATE.selectedBotId = "";
-    localStorage.removeItem("selectedBotId");
+    LS.removeItem("selectedBotId");
   }
   if (STATE.dashboardBotId && !ids.has(STATE.dashboardBotId)) {
     STATE.dashboardBotId = "";
-    localStorage.removeItem("dashboardBotId");
+    LS.removeItem("dashboardBotId");
   }
   if (!STATE.selectedBotId && STATE.bots.length === 1) {
     STATE.selectedBotId = STATE.bots[0].id;
-    localStorage.setItem("selectedBotId", STATE.selectedBotId);
+    LS.setItem("selectedBotId", STATE.selectedBotId);
   }
   renderBotSelects();
 }
@@ -3627,8 +3635,8 @@ async function loadBots({ force = false } = {}) {
 function bindBotSelect() {
   document.getElementById("dashboardBotSelect")?.addEventListener("change", (e) => {
     STATE.dashboardBotId = e.target.value;
-    if (STATE.dashboardBotId) localStorage.setItem("dashboardBotId", STATE.dashboardBotId);
-    else localStorage.removeItem("dashboardBotId");
+    if (STATE.dashboardBotId) LS.setItem("dashboardBotId", STATE.dashboardBotId);
+    else LS.removeItem("dashboardBotId");
     if (STATE.view === "dashboard") refresh(true);
   });
 }
@@ -3939,7 +3947,7 @@ async function openAddServerModal() {
       toastOk(`${server.alias || server.host}: деплой запущен`);
       closeModal();
       STATE.selectedBotId = server.id;
-      localStorage.setItem("selectedBotId", server.id);
+      LS.setItem("selectedBotId", server.id);
       switchView("servers");
       await refreshServers();
       renderBotSelects();
@@ -4130,7 +4138,7 @@ async function handleServerAction(act, sid) {
         await removeBot(sid);
         if (STATE.selectedBotId === sid) {
           STATE.selectedBotId = "";
-          localStorage.removeItem("selectedBotId");
+          LS.removeItem("selectedBotId");
         }
         toastOk("Удалён из реестра");
         await refreshServers();
@@ -4184,6 +4192,7 @@ async function init() {
     meUser = String(me.user || "");
     meKind = me.kind === "admin" ? "admin" : "user";
     meProfile = me.profile || null;
+    if (typeof bindImpersonationFromMe === "function") bindImpersonationFromMe(me);
   } catch {
     window.location.href = "/login";
     return;
@@ -4326,6 +4335,31 @@ async function init() {
     else if (STATE.view === "sources") refreshSources();
     else if (STATE.view === "servers") refreshServers();
   }, 8000);
+
+  if (window.ExsenderOnboarding && !ExsenderOnboarding.isDone("exsender")) {
+    ExsenderOnboarding.startTour("exsender", [
+      {
+        selector: '.nav-item[data-page="servers"]',
+        title: "Серверы",
+        text: "Добавь VDS, задеплой бота и следи за статусом.",
+      },
+      {
+        selector: '.nav-item[data-page="accounts"]',
+        title: "Аккаунты",
+        text: "Подключи Telegram-слоты: телефон, сессия или прокси.",
+      },
+      {
+        selector: '.nav-item[data-page="chats"]',
+        title: "Чаты",
+        text: "Включи чаты для рассылки и настрой интервал для каждого.",
+      },
+      {
+        selector: '.nav-item[data-page="sources"]',
+        title: "Источники",
+        text: "Укажи канал с постами — бот будет пересылать оттуда.",
+      },
+    ]);
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -59,17 +59,27 @@ async def send_message(
     await _tg_call(client, "sendMessage", json_body=body)
 
 
-def _extract_start_token(text: str) -> str:
+def _extract_start_token(text: str) -> tuple[str, str]:
+    """Return (kind, token) where kind is verify|reset|empty."""
     raw = (text or "").strip()
     if not raw.startswith("/start"):
-        return ""
+        return "", ""
     parts = raw.split(maxsplit=1)
     if len(parts) < 2:
-        return ""
+        return "", ""
     arg = parts[1].strip()
     if arg.startswith("verify_"):
-        return arg[len("verify_") :]
-    return arg
+        return "verify", arg[len("verify_") :]
+    if arg.startswith("reset_"):
+        return "reset", arg[len("reset_") :]
+    return "verify", arg
+
+
+def reset_deep_link(token: str, username: str = "") -> str:
+    uname = (username or VERIFY_BOT_USERNAME).lstrip("@")
+    if not uname:
+        return ""
+    return f"https://t.me/{uname}?start=reset_{token}"
 
 
 async def resolve_bot_username(client: httpx.AsyncClient) -> str:
@@ -100,6 +110,8 @@ async def handle_update(
     client: httpx.AsyncClient,
     pending: PendingRegistrationStore,
     telegram_taken: Callable[[int], bool],
+    password_reset: Any = None,
+    users_by_id: Callable[[str], Any] | None = None,
 ) -> None:
     msg = update.get("message") or update.get("edited_message")
     if not msg:
@@ -114,18 +126,54 @@ async def handle_update(
         return
     text = str(msg.get("text") or "")
 
-    if text.strip() in ("/help", "/start") and not _extract_start_token(text):
+    if text.strip() in ("/help", "/start") and not _extract_start_token(text)[1]:
         await send_message(
             client,
             int(chat_id),
-            "Это бот подтверждения регистрации exsender.\n\n"
-            "Откройте ссылку с сайта после заполнения формы — "
-            "кнопка «Подтвердить в Telegram».",
+            "Это бот подтверждения exsender.\n\n"
+            "• Регистрация — ссылка с формы на сайте\n"
+            "• Сброс пароля — ссылка со страницы «Забыли пароль?»",
         )
         return
 
-    token = _extract_start_token(text)
+    kind, token = _extract_start_token(text)
     if not token:
+        return
+
+    if kind == "reset" and password_reset is not None:
+        rec = password_reset.get(token)
+        if rec is None:
+            await send_message(
+                client,
+                int(chat_id),
+                "Ссылка недействительна или устарела. Запросите сброс пароля на сайте заново.",
+            )
+            return
+        user_rec = users_by_id(rec.user_id) if users_by_id else None
+        if user_rec is None:
+            await send_message(client, int(chat_id), "Аккаунт не найден.")
+            return
+        if int(getattr(user_rec, "telegram_user_id", 0) or 0) != tg_uid:
+            await send_message(
+                client,
+                int(chat_id),
+                "Этот Telegram не привязан к указанному аккаунту.\n"
+                "Используйте Telegram, который был при регистрации.",
+            )
+            return
+        ok, reply = password_reset.mark_verified(token, telegram_user_id=tg_uid)
+        if not ok:
+            await send_message(client, int(chat_id), reply)
+            return
+        site = os.getenv("SITE_PUBLIC_URL", "https://exsender.top").rstrip("/")
+        await send_message(
+            client,
+            int(chat_id),
+            reply,
+            reply_markup={
+                "inline_keyboard": [[{"text": "Задать новый пароль", "url": site + "/forgot-password?token=" + token}]]
+            },
+        )
         return
 
     if telegram_taken(tg_uid):
@@ -160,6 +208,9 @@ async def handle_update(
 async def run_verify_bot(
     pending: PendingRegistrationStore,
     telegram_taken: Callable[[int], bool],
+    *,
+    password_reset: Any = None,
+    users_by_id: Callable[[str], Any] | None = None,
 ) -> None:
     if not VERIFY_BOT_TOKEN:
         logger.warning(
@@ -193,6 +244,8 @@ async def run_verify_bot(
                             client=client,
                             pending=pending,
                             telegram_taken=telegram_taken,
+                            password_reset=password_reset,
+                            users_by_id=users_by_id,
                         )
                     except Exception:
                         logger.exception("verify bot handle_update")
@@ -206,7 +259,17 @@ async def run_verify_bot(
 def start_verify_bot_background(
     pending: PendingRegistrationStore,
     telegram_taken: Callable[[int], bool],
+    *,
+    password_reset: Any = None,
+    users_by_id: Callable[[str], Any] | None = None,
 ) -> Optional[asyncio.Task]:
     if not VERIFY_BOT_TOKEN:
         return None
-    return asyncio.create_task(run_verify_bot(pending, telegram_taken))
+    return asyncio.create_task(
+        run_verify_bot(
+            pending,
+            telegram_taken,
+            password_reset=password_reset,
+            users_by_id=users_by_id,
+        )
+    )

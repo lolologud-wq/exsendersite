@@ -304,6 +304,15 @@ class UserStore:
             return None
         return rec
 
+    def set_password(self, user_id: str, password: str) -> Optional[UserRecord]:
+        with self._lock:
+            rec = self._users.get(user_id)
+            if rec is None:
+                return None
+            rec.password_hash = _hash_password(password)
+            self._save_locked()
+            return rec
+
     def by_referral_code(self, code: str) -> Optional[UserRecord]:
         code_norm = str(code or "").strip().upper()
         if not code_norm:

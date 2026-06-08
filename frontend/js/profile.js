@@ -12,6 +12,36 @@
   let useReferralBalance = true;
   let lastReferralBalance = 0;
 
+  function isInviterHost() {
+    return (window.location.hostname || "").toLowerCase().startsWith("inviter.");
+  }
+
+  function panelHref() {
+    return isInviterHost() ? "/inviter" : "/app";
+  }
+
+  function applyHostNav() {
+    const dash = document.getElementById("pfDashLink");
+    const mobileDash = document.getElementById("pfMobileDash");
+    const openApp = document.getElementById("pfOpenApp");
+    const invLink = document.getElementById("pfInviterLink");
+    const mobileInv = document.getElementById("pfMobileInviter");
+    const brand = document.querySelector(".pf-brand span:last-child");
+    if (isInviterHost()) {
+      if (dash) { dash.href = "/inviter"; dash.textContent = "Inviter"; }
+      if (mobileDash) { mobileDash.href = "/inviter"; mobileDash.textContent = "Inviter"; }
+      if (invLink) invLink.hidden = true;
+      if (mobileInv) mobileInv.hidden = true;
+      if (brand) brand.textContent = "inviter";
+    } else {
+      if (invLink) invLink.hidden = false;
+    }
+    if (openApp && isInviterHost()) {
+      openApp.href = "/inviter";
+      openApp.textContent = "Открыть inviter";
+    }
+  }
+
   function fmtUsd(n) {
     return `$${Number(n).toFixed(Number(n) % 1 ? 2 : 0)}`;
   }
@@ -104,9 +134,9 @@
     if (dashLink) dashLink.hidden = false;
     if (openApp) {
         openApp.hidden = false;
+        openApp.href = panelHref();
         if (active) {
-          openApp.href = "/app";
-          openApp.textContent = "Открыть панель";
+          openApp.textContent = isInviterHost() ? "Открыть inviter" : "Открыть панель";
           openApp.className = "btn-primary";
         } else {
           openApp.href = "#pfPlansSection";
@@ -223,7 +253,7 @@
         showAlert("Оплата прошла — подписка активирована!", "ok");
         closePayModal();
         await loadProfile();
-        setTimeout(() => { window.location.href = "/app"; }, 1200);
+        setTimeout(() => { window.location.href = panelHref(); }, 1200);
       }
     } catch (e) {
       console.warn("poll invoice", e);
@@ -247,7 +277,7 @@
           "ok",
         );
         await loadProfile();
-        setTimeout(() => { window.location.href = "/app"; }, 1200);
+        setTimeout(() => { window.location.href = panelHref(); }, 1200);
         return;
       }
       activeInvoiceId = res.invoiceId;
@@ -447,6 +477,9 @@
       renderReferral(data.profile, data.referral);
       renderNotifications(data.notifications || []);
     }
+    if (data.impersonatedBy && typeof bindImpersonationFromMe === "function") {
+      bindImpersonationFromMe(data);
+    }
 
     if (!data.cryptoBotConfigured && data.kind === "user") {
       showAlert("Платежи временно недоступны — администратор не настроил CRYPTO_BOT_TOKEN.", "warn");
@@ -508,5 +541,6 @@
     }
   });
 
+  applyHostNav();
   loadProfile().catch((e) => showAlert(e.message, "err"));
 })();

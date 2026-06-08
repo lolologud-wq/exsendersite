@@ -126,6 +126,11 @@ _TME_POST_PUBLIC = re.compile(
 )
 
 
+def _private_channel_peer_id(inner: int) -> int:
+    """t.me/c/ID → peer_id вида -100<ID> (не -100*ID)."""
+    return int(f"-100{int(inner)}")
+
+
 def parse_tme_post_link(text: str) -> tuple[str | int, int] | None:
     """(username str или int peer_id, message_id) или None."""
     s = (text or "").strip()
@@ -133,7 +138,7 @@ def parse_tme_post_link(text: str) -> tuple[str | int, int] | None:
     if m:
         inner = int(m.group(1))
         mid = int(m.group(2))
-        return (-100 * inner, mid)
+        return (_private_channel_peer_id(inner), mid)
     m = _TME_POST_PUBLIC.search(s)
     if m:
         u = m.group(1)

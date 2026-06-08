@@ -10,6 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
   <link rel="stylesheet" href="css/profile.css?v=20260528chk2" />
+  <link rel="stylesheet" href="css/onboarding.css?v=20260608ob1" />
   <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
 </head>
 <body class="pf-body">
@@ -22,6 +23,7 @@
     </a>
     <nav class="pf-topnav">
       <a href="/app" id="pfDashLink">Дашборд</a>
+      <a href="https://inviter.exsender.top" id="pfInviterLink">Inviter</a>
       <a href="/profile" class="active">Профиль</a>
       <a href="/changelog">Changelog</a>
     </nav>
@@ -40,6 +42,7 @@
 <div class="pf-mobile-backdrop" id="pfMobileBackdrop" hidden aria-hidden="true"></div>
 <nav class="pf-mobile-nav" id="pfMobileNav" aria-label="Навигация">
   <a href="/app" id="pfMobileDash">Дашборд</a>
+  <a href="https://inviter.exsender.top" id="pfMobileInviter">Inviter</a>
   <a href="/profile" class="active">Профиль</a>
   <a href="/changelog">Changelog</a>
 </nav>
@@ -136,8 +139,9 @@
   </div>
 </div>
 
-  <script src="js/http.js"></script>
-  <script src="js/pf-nav.js"></script>
-  <script src="js/profile.js"></script>
+  <script src="js/http.js" defer></script>
+  <script src="js/pf-nav.js" defer></script>
+  <script src="js/impersonation.js" defer></script>
+  <script src="js/profile.js?v=20260608pf1" defer></script>
 </body>
 </html>

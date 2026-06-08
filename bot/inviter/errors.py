@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -20,6 +21,24 @@ from telethon.errors import (
 from telethon.tl.functions.channels import InviteToChannelRequest
 from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.tl.types import InputPeerChannel, InputPeerChat
+
+logger = logging.getLogger(__name__)
+
+INVITE_RPC_TIMEOUT_SEC = max(10.0, float(os.getenv("INVITE_RPC_TIMEOUT_SEC", "45")))
+MAX_FLOODWAIT_SEC = max(30, int(os.getenv("INVITE_MAX_FLOODWAIT_SEC", "120")))
+
+
+async def _invite_rpc(coro: Any) -> Any:
+    return await asyncio.wait_for(coro, timeout=INVITE_RPC_TIMEOUT_SEC)
+
+
+async def _sleep_floodwait(seconds: int) -> bool:
+    """Sleep for FloodWait; return True if wait is too long (abort invite)."""
+    need = int(seconds) + 1
+    if need > MAX_FLOODWAIT_SEC:
+        return True
+    await asyncio.sleep(need)
+    return False
 
 
 def _input_user_id(user: Any) -> int | None:
@@ -83,7 +102,7 @@ def needs_invite_cooldown(result: str) -> bool:
 
 
 def invite_api_batch_size() -> int:
-    return max(1, min(int(os.getenv("INVITE_API_BATCH", "5")), 20))
+    return max(1, min(int(os.getenv("INVITE_API_BATCH", "1")), 20))
 
 
 async def invite_many(client: TelegramClient, target_input, users: list[Any]) -> list[str]:
@@ -97,8 +116,13 @@ async def invite_many(client: TelegramClient, target_input, users: list[Any]) ->
             out.append(await invite_one(client, target_input, user))
         return out
     try:
-        result = await client(InviteToChannelRequest(channel=target_input, users=users))
+        result = await _invite_rpc(
+            client(InviteToChannelRequest(channel=target_input, users=users))
+        )
         return _results_from_invited_users(result, users)
+    except asyncio.TimeoutError:
+        logger.warning("InviteToChannel batch timeout (%s users)", len(users))
+        return ["invite_timeout"] * len(users)
     except (
         UserAlreadyParticipantError,
         UserPrivacyRestrictedError,
@@ -113,13 +137,18 @@ async def invite_many(client: TelegramClient, target_input, users: list[Any]) ->
             out.append(await invite_one(client, target_input, user))
         return out
     except FloodWaitError as error:
-        await asyncio.sleep(error.seconds + 1)
+        if await _sleep_floodwait(error.seconds):
+            return ["peer_flood"] * len(users)
         try:
-            result = await client(InviteToChannelRequest(channel=target_input, users=users))
+            result = await _invite_rpc(
+                client(InviteToChannelRequest(channel=target_input, users=users))
+            )
             return [
                 "invited_after_wait" if r == "invited" else r
                 for r in _results_from_invited_users(result, users)
             ]
+        except asyncio.TimeoutError:
+            return ["invite_timeout"] * len(users)
         except RPCError:
             out = []
             for user in users:
@@ -135,15 +164,23 @@ async def invite_many(client: TelegramClient, target_input, users: list[Any]) ->
 async def invite_one(client: TelegramClient, target_input, user) -> str:
     try:
         if isinstance(target_input, InputPeerChannel):
-            result = await client(InviteToChannelRequest(channel=target_input, users=[user]))
-            return _results_from_invited_users(result, [user])[0]
-        elif isinstance(target_input, InputPeerChat):
-            result = await client(
-                AddChatUserRequest(chat_id=target_input.chat_id, user_id=user, fwd_limit=10)
+            result = await _invite_rpc(
+                client(InviteToChannelRequest(channel=target_input, users=[user]))
             )
             return _results_from_invited_users(result, [user])[0]
+        elif isinstance(target_input, InputPeerChat):
+            await _invite_rpc(
+                client(
+                    AddChatUserRequest(
+                        chat_id=target_input.chat_id, user_id=user, fwd_limit=10
+                    )
+                )
+            )
+            return "invited"
         else:
             return "unsupported_target_type"
+    except asyncio.TimeoutError:
+        return "invite_timeout"
     except UserAlreadyParticipantError:
         return "already_in_chat"
     except UserPrivacyRestrictedError:
@@ -159,19 +196,28 @@ async def invite_one(client: TelegramClient, target_input, user) -> str:
     except PeerFloodError:
         return "peer_flood"
     except FloodWaitError as error:
-        await asyncio.sleep(error.seconds + 1)
+        if await _sleep_floodwait(error.seconds):
+            return "peer_flood"
         try:
             if isinstance(target_input, InputPeerChannel):
-                result = await client(InviteToChannelRequest(channel=target_input, users=[user]))
-                status = _results_from_invited_users(result, [user])[0]
-            elif isinstance(target_input, InputPeerChat):
-                result = await client(
-                    AddChatUserRequest(chat_id=target_input.chat_id, user_id=user, fwd_limit=10)
+                result = await _invite_rpc(
+                    client(InviteToChannelRequest(channel=target_input, users=[user]))
                 )
                 status = _results_from_invited_users(result, [user])[0]
+            elif isinstance(target_input, InputPeerChat):
+                await _invite_rpc(
+                    client(
+                        AddChatUserRequest(
+                            chat_id=target_input.chat_id, user_id=user, fwd_limit=10
+                        )
+                    )
+                )
+                status = "invited"
             else:
                 return "unsupported_target_type"
             return "invited_after_wait" if status == "invited" else status
+        except asyncio.TimeoutError:
+            return "invite_timeout"
         except RPCError:
             return "failed_after_wait"
     except RPCError as error:

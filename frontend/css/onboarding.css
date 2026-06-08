@@ -1,0 +1,70 @@
+.ob-root {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  pointer-events: none;
+}
+.ob-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+}
+.ob-spot {
+  position: fixed;
+  border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+  transition: top 0.2s ease, left 0.2s ease, width 0.2s ease, height 0.2s ease;
+}
+.ob-card {
+  position: fixed;
+  width: min(300px, calc(100vw - 24px));
+  padding: 16px;
+  border-radius: 14px;
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  z-index: 1;
+}
+.ob-step {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 6px;
+}
+.ob-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.ob-text {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.72);
+}
+.ob-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.ob-tour-active .sidebar,
+.ob-tour-active .main {
+  isolation: isolate;
+}
+.imp-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: rgba(251, 191, 36, 0.12);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.35);
+  color: #fde68a;
+  font-size: 13px;
+}
+.imp-banner b { color: #fff; }

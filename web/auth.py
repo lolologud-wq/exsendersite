@@ -123,6 +123,15 @@ def issue_user_cookie(response: Response, user_id: str, request: Any = None) -> 
     response.set_cookie(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, **_cookie_kwargs())
 
 
+def issue_impersonation_cookie(
+    response: Response, user_id: str, admin_login: str, request: Any = None
+) -> None:
+    token = _serializer.dumps(
+        {"uid": user_id, "imp": admin_login.strip(), "v": 2}
+    )
+    response.set_cookie(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, **_cookie_kwargs())
+
+
 # Backwards-compat name still imported by app.py.
 def issue_cookie(response: Response) -> None:
     issue_admin_cookie(response, LOGIN)
@@ -180,7 +189,11 @@ def current_identity(request: Request, users: UserStore) -> dict[str, Any]:
     if uid:
         rec = users.get(uid)
         if rec is not None:
-            return {"kind": "user", "record": rec}
+            result: dict[str, Any] = {"kind": "user", "record": rec}
+            imp = data.get("imp")
+            if imp and is_admin_login(str(imp)):
+                result["impersonated_by"] = str(imp)
+            return result
     return {"kind": "anon"}
 
 

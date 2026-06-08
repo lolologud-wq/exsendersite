@@ -39,6 +39,7 @@ class ChangelogEntry:
             "date": self.date,
             "tags": list(self.tags or []),
             "body": self.body,
+            "published": self.published,
             "createdAt": self.created_at,
         }
 
@@ -145,3 +146,57 @@ class ChangelogStore:
             self._items.append(entry)
             self._save_locked()
         return entry
+
+    def get(self, entry_id: str) -> Optional[ChangelogEntry]:
+        entry_id = (entry_id or "").strip()
+        if not entry_id:
+            return None
+        for item in self._items:
+            if item.id == entry_id:
+                return item
+        return None
+
+    def update(
+        self,
+        entry_id: str,
+        *,
+        version: Optional[str] = None,
+        title: Optional[str] = None,
+        date: Optional[str] = None,
+        body: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        published: Optional[bool] = None,
+    ) -> ChangelogEntry:
+        with self._lock:
+            entry = self.get(entry_id)
+            if entry is None:
+                raise ValueError("Запись не найдена")
+            if version is not None:
+                entry.version = version.strip()[:32]
+            if title is not None:
+                title_s = title.strip()
+                if not title_s:
+                    raise ValueError("Заголовок обязателен")
+                entry.title = title_s[:200]
+            if date is not None:
+                entry.date = date.strip()[:16] or entry.date
+            if body is not None:
+                body_s = body.strip()
+                if not body_s:
+                    raise ValueError("Текст обязателен")
+                entry.body = body_s[:12000]
+            if tags is not None:
+                entry.tags = [str(t).strip()[:32] for t in tags if str(t).strip()]
+            if published is not None:
+                entry.published = bool(published)
+            self._save_locked()
+            return entry
+
+    def delete(self, entry_id: str) -> bool:
+        with self._lock:
+            before = len(self._items)
+            self._items = [x for x in self._items if x.id != entry_id]
+            if len(self._items) == before:
+                return False
+            self._save_locked()
+            return True

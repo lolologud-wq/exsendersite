@@ -20,8 +20,6 @@ from inviter.errors import (
     format_error_message,
     format_invite_result_error,
     get_antiflood_timing,
-    invite_api_batch_size,
-    invite_many,
     invite_one,
     needs_invite_cooldown,
     sleep_with_stop,
@@ -124,6 +122,7 @@ class InviterService:
         self.bot = bot_service
         self.db_path = inviter_db.init_db(db_path)
         self._job_task: asyncio.Task | None = None
+        self._invite_locks: dict[str, asyncio.Lock] = {}
         self._stop_flag = False
         self._job_state: dict[str, Any] = {
             "running": False,
@@ -419,6 +418,10 @@ class InviterService:
         self._stop_flag = True
         return {"ok": True, "message": "Запрос на остановку отправлен"}
 
+    def _sync_job_progress(self, stats: dict[str, int]) -> None:
+        self._job_state["progress"] = sum(int(v) for v in stats.values())
+        self._job_state["stats"] = dict(stats)
+
     async def _run_invite_job(
         self,
         account_id: str,
@@ -427,7 +430,22 @@ class InviterService:
         limit: int,
         delay: float,
     ) -> None:
+        lock = self._invite_locks.setdefault(account_id, asyncio.Lock())
         stats: dict[str, int] = {}
+        async with lock:
+            await self._run_invite_job_locked(
+                account_id, target_ref, limit=limit, delay=delay, stats=stats
+            )
+
+    async def _run_invite_job_locked(
+        self,
+        account_id: str,
+        target_ref: str,
+        *,
+        limit: int,
+        delay: float,
+        stats: dict[str, int],
+    ) -> None:
         try:
             queue_rows = inviter_db.get_queue(
                 self.db_path, account_id, limit=limit if limit > 0 else 0
@@ -470,7 +488,6 @@ class InviterService:
             per_invite_min, per_invite_max, batch_size, batch_pause_min, batch_pause_max = (
                 get_antiflood_timing(delay)
             )
-            api_batch = invite_api_batch_size()
             fatal_target_results = {
                 "chat_write_forbidden",
                 "no_admin_rights",
@@ -481,65 +498,24 @@ class InviterService:
             }
             blocked_ids = inviter_db.get_blocked_user_ids(self.db_path, account_id)
             processed = 0
-            row_idx = 0
 
-            while row_idx < len(queue_rows):
+            for row in queue_rows:
                 if self._stop_flag:
                     break
 
-                batch_rows: list[dict[str, Any]] = []
-                batch_users: list[Any] = []
+                processed += 1
+                tg_user_id = int(row["tg_user_id"])
 
-                while row_idx < len(queue_rows) and len(batch_rows) < api_batch:
-                    row = queue_rows[row_idx]
-                    row_idx += 1
-                    processed += 1
-                    self._job_state["progress"] = processed
-                    tg_user_id = int(row["tg_user_id"])
-
-                    if tg_user_id in blocked_ids:
-                        result = "blocked_list"
-                        stats[result] = stats.get(result, 0) + 1
-                        inviter_db.remove_queue_item(self.db_path, int(row["id"]))
-                        self._job_state["stats"] = dict(stats)
-                        continue
-
-                    user_input, pre_result = await _resolve_invite_user(client, row)
-                    if pre_result:
-                        result = pre_result
-                        stats[result] = stats.get(result, 0) + 1
-                        self._job_state["lastResult"] = result
-                        if result == "privacy_restricted":
-                            inviter_db.mark_blocked_user(
-                                self.db_path, account_id, tg_user_id, "privacy_restricted"
-                            )
-                        if result not in fatal_target_results:
-                            inviter_db.remove_queue_item(self.db_path, int(row["id"]))
-                        self._job_state["stats"] = dict(stats)
-                        if result in fatal_target_results:
-                            self._job_state["lastError"] = format_invite_result_error(result)
-                            row_idx = len(queue_rows)
-                            break
-                        continue
-
-                    batch_rows.append(row)
-                    batch_users.append(user_input)
-
-                if not batch_rows:
+                if tg_user_id in blocked_ids:
+                    result = "blocked_list"
+                    stats[result] = stats.get(result, 0) + 1
+                    inviter_db.remove_queue_item(self.db_path, int(row["id"]))
+                    self._sync_job_progress(stats)
                     continue
 
-                t0 = time.perf_counter()
-                if len(batch_users) == 1:
-                    results = [await invite_one(client, target_input, batch_users[0])]
-                else:
-                    results = await invite_many(client, target_input, batch_users)
-                elapsed = round(time.perf_counter() - t0, 2)
-                per_user_sec = round(elapsed / len(batch_users), 2)
-                self._job_state["lastInviteSec"] = per_user_sec
-
-                batch_cooldown = False
-                for row, result in zip(batch_rows, results):
-                    tg_user_id = int(row["tg_user_id"])
+                user_input, pre_result = await _resolve_invite_user(client, row)
+                if pre_result:
+                    result = pre_result
                     stats[result] = stats.get(result, 0) + 1
                     self._job_state["lastResult"] = result
                     if result == "privacy_restricted":
@@ -548,22 +524,43 @@ class InviterService:
                         )
                     if result not in fatal_target_results:
                         inviter_db.remove_queue_item(self.db_path, int(row["id"]))
+                    self._sync_job_progress(stats)
                     if result in fatal_target_results:
                         self._job_state["lastError"] = format_invite_result_error(result)
-                        row_idx = len(queue_rows)
                         break
-                    if result == "peer_flood":
-                        self._job_state["lastError"] = format_invite_result_error("peer_flood")
-                        row_idx = len(queue_rows)
-                        break
-                    if needs_invite_cooldown(result):
-                        batch_cooldown = True
+                    continue
 
-                self._job_state["stats"] = dict(stats)
-                if self._job_state.get("lastError"):
+                t0 = time.perf_counter()
+                result = await invite_one(client, target_input, user_input)
+                self._job_state["lastInviteSec"] = round(time.perf_counter() - t0, 2)
+                stats[result] = stats.get(result, 0) + 1
+                self._job_state["lastResult"] = result
+                if result == "privacy_restricted":
+                    inviter_db.mark_blocked_user(
+                        self.db_path, account_id, tg_user_id, "privacy_restricted"
+                    )
+                if result not in fatal_target_results:
+                    inviter_db.remove_queue_item(self.db_path, int(row["id"]))
+                self._sync_job_progress(stats)
+                logger.info(
+                    "invite account=%s user=%s result=%s (%s/%s)",
+                    account_id,
+                    tg_user_id,
+                    result,
+                    self._job_state["progress"],
+                    total,
+                )
+
+                if result in fatal_target_results:
+                    self._job_state["lastError"] = format_invite_result_error(result)
                     break
+                if result == "peer_flood":
+                    self._job_state["lastError"] = format_invite_result_error("peer_flood")
+                    break
+                if result == "invite_timeout":
+                    logger.warning("invite timeout account=%s user=%s", account_id, tg_user_id)
 
-                if batch_cooldown:
+                if needs_invite_cooldown(result):
                     wait_s = random.uniform(per_invite_min, per_invite_max)
                     if await sleep_with_stop(lambda: self._stop_flag, wait_s):
                         break
@@ -572,6 +569,8 @@ class InviterService:
                     batch_wait = random.uniform(batch_pause_min, batch_pause_max)
                     if await sleep_with_stop(lambda: self._stop_flag, batch_wait):
                         break
+
+                await asyncio.sleep(0)
         except RPCError as exc:
             logger.exception("Invite job RPC error account=%s", account_id)
             self._job_state["lastError"] = format_error_message(exc)

@@ -1,5 +1,6 @@
 (function () {
   let usersCache = [];
+  let changelogCache = [];
 
   function fmtUsd(n) {
     return `$${Number(n).toFixed(Number(n) % 1 ? 2 : 0)}`;
@@ -332,6 +333,7 @@
           <td><span class="adm-pill ${statusCls}">${statusTxt}</span></td>
           <td class="adm-actions">
             <button type="button" class="btn-ghost adm-btn-sm" data-act="grant" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}">+план</button>
+            <button type="button" class="btn-primary adm-btn-sm" data-act="impersonate" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}" title="Войти как пользователь">войти</button>
             <button type="button" class="btn-ghost adm-btn-sm" data-act="ref" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}" data-balance="${refBal}">+реф</button>
             <button type="button" class="btn-ghost adm-btn-sm" data-act="block" data-uid="${escapeHtml(u.id)}" data-blocked="${u.blocked ? "1" : "0"}">${u.blocked ? "разблок" : "блок"}</button>
             <button type="button" class="btn-danger adm-btn-sm" data-act="delete" data-uid="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email)}" title="Удалить аккаунт">удалить</button>
@@ -362,18 +364,35 @@
   }
 
   function renderChangelog(items) {
+    changelogCache = items || [];
     const body = document.getElementById("admChangelogBody");
     if (!body) return;
     if (!items?.length) {
-      body.innerHTML = '<tr><td colspan="3" class="adm-empty">Записей нет.</td></tr>';
+      body.innerHTML = '<tr><td colspan="4" class="adm-empty">Записей нет.</td></tr>';
       return;
     }
     body.innerHTML = items.map((e) => `
       <tr>
         <td>${escapeHtml(e.date || fmtDate(e.createdAt))}</td>
         <td><code>${escapeHtml(e.version || "—")}</code></td>
-        <td>${escapeHtml(e.title)}</td>
+        <td>${escapeHtml(e.title)}${e.published === false ? ' <span class="adm-pill adm-pill-off">draft</span>' : ""}</td>
+        <td class="adm-actions">
+          <button type="button" class="btn-ghost adm-btn-sm" data-cl-edit="${escapeHtml(e.id)}">ред.</button>
+        </td>
       </tr>`).join("");
+  }
+
+  function fillChangelogForm(entry) {
+    document.getElementById("clEditId").value = entry?.id || "";
+    document.getElementById("clVersion").value = entry?.version || "";
+    document.getElementById("clDate").value = entry?.date || "";
+    document.getElementById("clTitle").value = entry?.title || "";
+    document.getElementById("clTags").value = (entry?.tags || []).join(", ");
+    document.getElementById("clBody").value = entry?.body || "";
+    const submit = document.getElementById("clSubmitBtn");
+    const cancel = document.getElementById("clCancelEdit");
+    if (submit) submit.textContent = entry ? "Сохранить" : "Опубликовать";
+    if (cancel) cancel.hidden = !entry;
   }
 
   function renderAudit(items) {
@@ -531,6 +550,15 @@
         document.getElementById("refBalanceEmail").scrollIntoView({ behavior: "smooth", block: "center" });
         return;
       }
+      if (act === "impersonate") {
+        const email = btn.dataset.email || uid;
+        if (!confirm(`Войти как ${email}?\n\nОткроется панель пользователя. Выйти — жёлтый баннер сверху.`)) return;
+        try {
+          const res = await api("POST", `/api/admin/users/${encodeURIComponent(uid)}/impersonate`, {});
+          window.location.href = res.redirect || "/app";
+        } catch (err) { showAlert(err.message); }
+        return;
+      }
       if (act === "block") {
         const blocked = btn.dataset.blocked !== "1";
         if (blocked && !confirm(`Заблокировать ${btn.dataset.email || uid}?`)) return;
@@ -567,18 +595,41 @@
       } catch (err) { showAlert(err.message); }
     });
 
+    document.getElementById("admChangelogBody")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-cl-edit]");
+      if (!btn) return;
+      const entry = changelogCache.find((x) => x.id === btn.dataset.clEdit);
+      if (entry) {
+        fillChangelogForm(entry);
+        document.getElementById("admChangelogForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+
+    document.getElementById("clCancelEdit")?.addEventListener("click", () => {
+      document.getElementById("admChangelogForm")?.reset();
+      fillChangelogForm(null);
+    });
+
     document.getElementById("admChangelogForm")?.addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
-        await api("POST", "/api/admin/changelog", {
+        const payload = {
           version: document.getElementById("clVersion").value.trim(),
           date: document.getElementById("clDate").value.trim(),
           title: document.getElementById("clTitle").value.trim(),
           tags: document.getElementById("clTags").value.trim(),
           body: document.getElementById("clBody").value.trim(),
-        });
-        showAlert("Запись опубликована", "ok");
+        };
+        const editId = document.getElementById("clEditId").value.trim();
+        if (editId) {
+          await api("PATCH", `/api/admin/changelog/${encodeURIComponent(editId)}`, payload);
+          showAlert("Запись обновлена", "ok");
+        } else {
+          await api("POST", "/api/admin/changelog", payload);
+          showAlert("Запись опубликована", "ok");
+        }
         e.target.reset();
+        fillChangelogForm(null);
         const cl = await api("GET", "/api/admin/changelog");
         renderChangelog(cl.items);
       } catch (err) { showAlert(err.message); }

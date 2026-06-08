@@ -54,6 +54,17 @@ def put(bot_id: str, overview: dict[str, Any]) -> None:
     tmp.replace(_path(bot_id))
 
 
+def invalidate(bot_id: str) -> None:
+    """Drop cached overview for bot (memory + disk)."""
+    _mem.pop(bot_id, None)
+    try:
+        p = _path(bot_id)
+        if p.is_file():
+            p.unlink()
+    except OSError as e:
+        logger.debug("overview cache invalidate %s: %s", bot_id, e)
+
+
 def age_sec(bot_id: str) -> float | None:
     hit = _mem.get(bot_id)
     if hit:

@@ -136,7 +136,7 @@
       throw new Error("Сессия истекла");
     }
     if (r.status === 403 && data.detail === "subscription required") {
-      window.location.href = "https://exsender.top/profile";
+      window.location.href = "/profile";
       throw new Error("Нужна активная подписка");
     }
     if (r.status === 403 && data.detail === "admin only") {
@@ -215,9 +215,9 @@
   async function refreshWorkspaceData() {
     await loadBots();
     await loadWorkspaceAccounts();
-    await refreshOverview();
-    await refreshParse();
-    await refreshJob();
+    try { await refreshOverview(); } catch (e) { console.warn("overview", e); }
+    try { await refreshParse(); } catch (e) { console.warn("parse", e); }
+    try { await refreshJob(); } catch (e) { console.warn("job", e); }
   }
 
   async function refreshCurrentView() {
@@ -788,6 +788,7 @@
     chat_write_forbidden: { label: "Нет прав", cls: "bad" },
     no_admin_rights: { label: "Нет админки", cls: "bad" },
     target_chat_private: { label: "Чат закрыт", cls: "bad" },
+    invite_timeout: { label: "Таймаут", cls: "warn" },
   };
 
   let _invPieSeq = 0;
@@ -1076,12 +1077,24 @@
     if (dot && running) dot.className = "dot-led pulse";
   }
 
+  const IDLE_PARSE = { running: false, progress: 0, phase: "", sourceTitle: "", lastError: "", result: {} };
+  const IDLE_JOB = { running: false, progress: 0, total: 0, stats: {}, lastError: "" };
+
   async function refreshParse() {
     if (!selectedBot()) {
-      renderParse({ running: false, progress: 0, phase: "", sourceTitle: "", lastError: "", result: {} });
+      renderParse(IDLE_PARSE);
       return;
     }
-    const data = await botApi("GET", "parse");
+    let data;
+    try {
+      data = await botApi("GET", "parse");
+    } catch (e) {
+      if (/method not allowed/i.test(String(e.message || e))) {
+        renderParse(IDLE_PARSE);
+        return;
+      }
+      throw e;
+    }
     renderParse(data);
     if (data.running && !STATE.parseTimer) STATE.parseTimer = setInterval(refreshParse, 2000);
     if (!data.running && STATE.parseTimer) {
@@ -1135,10 +1148,19 @@
 
   async function refreshJob() {
     if (!selectedBot()) {
-      renderJob({ running: false, progress: 0, total: 0, stats: {}, lastError: "" });
+      renderJob(IDLE_JOB);
       return;
     }
-    const data = await botApi("GET", "job");
+    let data;
+    try {
+      data = await botApi("GET", "job");
+    } catch (e) {
+      if (/method not allowed/i.test(String(e.message || e))) {
+        renderJob(IDLE_JOB);
+        return;
+      }
+      throw e;
+    }
     renderJob(data);
     if (data.running && !STATE.jobTimer) STATE.jobTimer = setInterval(refreshJob, 1500);
     if (!data.running && STATE.jobTimer) {
@@ -1232,6 +1254,52 @@
     });
   }
 
+  function renderNotifications(items) {
+    const host = $("invNotifyHost");
+    if (!host || !items?.length) return;
+    host.innerHTML = items.map(function (n) {
+      return '<div class="inv-alert inv-alert-ok inv-notify-banner" data-nid="' + escapeHtml(n.id) + '">' +
+        '<span><b>' + escapeHtml(n.title) + '</b> — ' + escapeHtml(n.message) + '</span>' +
+        '<button type="button" class="btn-ghost inv-notify-dismiss">OK</button></div>';
+    }).join("");
+    host.querySelectorAll(".inv-notify-dismiss").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const item = btn.closest("[data-nid]");
+        const nid = item?.dataset.nid;
+        if (nid) {
+          try { await api("POST", "/api/users/notifications/" + encodeURIComponent(nid) + "/read", {}); } catch (_) { /* ignore */ }
+        }
+        item?.remove();
+      });
+    });
+  }
+
+  function startInviterOnboarding() {
+    if (!window.ExsenderOnboarding || ExsenderOnboarding.isDone("inviter")) return;
+    ExsenderOnboarding.startTour("inviter", [
+      {
+        selector: "#invPickerCard",
+        title: "VDS и аккаунт",
+        text: "Выбери сервер и слот — можно использовать VDS и аккаунты из exsender.",
+      },
+      {
+        selector: '#invNav .nav-item[data-page="parse"]',
+        title: "Парс",
+        text: "Собери аудиторию из чата-источника в очередь на инвайт.",
+      },
+      {
+        selector: '#invNav .nav-item[data-page="invite"]',
+        title: "Инвайт",
+        text: "Укажи target-чат, задержку и запусти приглашения.",
+      },
+      {
+        selector: "#invNavProfile",
+        title: "Профиль и оплата",
+        text: "Тариф, уведомления и рефералка — прямо здесь, без перехода на exsender.top.",
+      },
+    ]);
+  }
+
   async function init() {
     bindSidebar();
     bindModal();
@@ -1249,6 +1317,14 @@
     else if (typeof syncCsrfFromCookie === "function") syncCsrfFromCookie();
     else if (typeof refreshCsrf === "function") await refreshCsrf();
     setText("invUser", me.user || "—");
+    if (typeof bindImpersonationFromMe === "function") bindImpersonationFromMe(me);
+
+    if (me.kind === "user") {
+      try {
+        const prof = await api("GET", "/api/users/me");
+        renderNotifications(prof.notifications || []);
+      } catch (e) { console.warn("inviter profile", e); }
+    }
 
     document.querySelectorAll("#invNav .nav-item[data-page]").forEach(function (el) {
       el.addEventListener("click", function (e) {
@@ -1351,13 +1427,20 @@
 
     $("invStopBtn").addEventListener("click", async function () {
       try {
-        await botApi("POST", "inviter/stop", {});
-        showAlert("Стоп", "ok");
+        const bid = selectedBot();
+        if (!bid) throw new Error("Выбери VDS");
+        const res = await api("POST", "/api/inviter/bots/" + encodeURIComponent(bid) + "/invite/stop", {});
+        if (res && res.ok === false) {
+          showAlert(res.message || "Нет активного инвайта");
+        } else {
+          showAlert("Инвайт остановлен", "ok");
+        }
         await refreshJob();
       } catch (e) { showAlert(e.message); }
     });
 
     switchView("dashboard");
+    startInviterOnboarding();
   }
 
   init().catch(function (e) { showAlert(e.message || String(e)); });
