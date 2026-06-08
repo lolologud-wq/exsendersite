@@ -4,6 +4,10 @@
   margin-bottom: 20px;
 }
 
+.inv-bot-filter {
+  min-width: 160px;
+}
+
 .inv-activity-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -31,6 +35,60 @@
   margin: 0;
   font-size: 12px;
   color: var(--text-mute);
+}
+
+.inv-parsed-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inv-archive-check {
+  align-items: center;
+  color: var(--text-mute);
+  display: inline-flex;
+  font-size: 13px;
+  gap: 6px;
+  min-height: 36px;
+}
+
+.inv-parsed-table .inv-category-select {
+  min-width: 128px;
+}
+
+.inv-parsed-table .inv-note-input {
+  min-height: 44px;
+  min-width: 220px;
+  resize: vertical;
+}
+
+.inv-parsed-row-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.row-archived {
+  opacity: 0.72;
+}
+
+.row-archived .account-name {
+  color: var(--text-mute);
+}
+
+.inv-safety-panel {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  margin-top: 12px;
+}
+
+.inv-safety-panel ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.inv-safety-panel li + li {
+  margin-top: 4px;
 }
 
 .inv-progress-lg {

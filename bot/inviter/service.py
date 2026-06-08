@@ -27,6 +27,16 @@ from inviter.errors import (
 
 logger = logging.getLogger(__name__)
 
+TRAFFIC_CATEGORIES = {
+    "warm",
+    "cold",
+    "crypto",
+    "business",
+    "adult",
+    "mixed",
+    "other",
+}
+
 def _parse_skip_reason(user: User) -> str | None:
     if getattr(user, "bot", False):
         return "bot"
@@ -370,6 +380,96 @@ class InviterService:
         items = inviter_db.get_queue(self.db_path, account_id, limit=limit)
         queue_count, _ = inviter_db.get_counts(self.db_path, account_id)
         return {"total": queue_count, "items": items}
+
+    def list_parsed_chats(
+        self,
+        account_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        account_id = (account_id or "").strip()
+        if not account_id:
+            raise ServiceError("accountId обязателен")
+        self.bot._require_account(account_id)
+        items = inviter_db.list_parsed_chats(
+            self.db_path,
+            account_id,
+            include_archived=include_archived,
+        )
+        active = sum(1 for item in items if not item.get("archived_at"))
+        archived = sum(1 for item in items if item.get("archived_at"))
+        return {
+            "items": items,
+            "total": len(items),
+            "active": active,
+            "archived": archived,
+            "categories": sorted(TRAFFIC_CATEGORIES),
+        }
+
+    def update_parsed_chat(
+        self,
+        account_id: str,
+        source_chat_id: str,
+        *,
+        traffic_category: str,
+        note: str,
+    ) -> dict[str, Any]:
+        account_id = (account_id or "").strip()
+        source_chat_id = (source_chat_id or "").strip()
+        traffic_category = (traffic_category or "other").strip().lower()
+        note = (note or "").strip()[:500]
+        if not account_id:
+            raise ServiceError("accountId обязателен")
+        if not source_chat_id:
+            raise ServiceError("sourceChatId обязателен")
+        if traffic_category not in TRAFFIC_CATEGORIES:
+            raise ServiceError("Неизвестная категория трафика", status=400)
+        self.bot._require_account(account_id)
+        item = inviter_db.update_parsed_chat_meta(
+            self.db_path,
+            account_id,
+            source_chat_id,
+            traffic_category=traffic_category,
+            note=note,
+        )
+        if item is None:
+            raise ServiceError("Источник не найден", status=404)
+        return {"ok": True, "item": item}
+
+    def archive_parsed_chat(
+        self,
+        account_id: str,
+        source_chat_id: str,
+        *,
+        archived: bool,
+    ) -> dict[str, Any]:
+        account_id = (account_id or "").strip()
+        source_chat_id = (source_chat_id or "").strip()
+        if not account_id:
+            raise ServiceError("accountId обязателен")
+        if not source_chat_id:
+            raise ServiceError("sourceChatId обязателен")
+        self.bot._require_account(account_id)
+        ok = inviter_db.set_parsed_chat_archived(
+            self.db_path,
+            account_id,
+            source_chat_id,
+            archived=archived,
+        )
+        if not ok:
+            raise ServiceError("Источник не найден", status=404)
+        return {"ok": True, "archived": archived}
+
+    def clear_parsed_source_queue(self, account_id: str, source_chat_id: str) -> dict[str, Any]:
+        account_id = (account_id or "").strip()
+        source_chat_id = (source_chat_id or "").strip()
+        if not account_id:
+            raise ServiceError("accountId обязателен")
+        if not source_chat_id:
+            raise ServiceError("sourceChatId обязателен")
+        self.bot._require_account(account_id)
+        removed = inviter_db.clear_queue_for_source(self.db_path, account_id, source_chat_id)
+        return {"ok": True, "removed": removed}
 
     def get_job(self) -> dict[str, Any]:
         return dict(self._job_state)

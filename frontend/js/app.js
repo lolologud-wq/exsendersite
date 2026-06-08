@@ -1485,12 +1485,22 @@ function openModal({ title, body, footer }) {
   document.getElementById("modalBody").innerHTML    = body;
   document.getElementById("modalFoot").innerHTML    = footer || "";
   const root = document.getElementById("modalRoot");
+  STATE.modalReturnFocus = document.activeElement;
   root.hidden = false;
-  requestAnimationFrame(() => root.classList.add("in"));
+  document.body.style.overflow = "hidden";
+  requestAnimationFrame(() => {
+    root.classList.add("in");
+    const panel = document.getElementById("modalPanel");
+    const focusTarget = panel?.querySelector(
+      "input, select, textarea, button:not([data-modal-close]), [href]"
+    ) || panel?.querySelector("[data-modal-close]");
+    focusTarget?.focus();
+  });
 }
 function closeModal() {
   const root = document.getElementById("modalRoot");
   root.classList.remove("in");
+  document.body.style.overflow = "";
   setTimeout(() => { root.hidden = true; }, 180);
   if (STATE.serverLogPollTimer) {
     clearInterval(STATE.serverLogPollTimer);
@@ -1498,6 +1508,10 @@ function closeModal() {
   }
   STATE.serverLogTarget = null;
   document.getElementById("modalPanel")?.classList.remove("modal-wide");
+  if (STATE.modalReturnFocus && typeof STATE.modalReturnFocus.focus === "function") {
+    STATE.modalReturnFocus.focus();
+  }
+  STATE.modalReturnFocus = null;
 }
 
 function modalActions(submitLabel, opts = {}) {
@@ -2322,7 +2336,7 @@ function renderAllChatsTable() {
 
   if (!rows.length) {
     const hint = STATE.chatsAccountFilter || STATE.chatsBotFilter
-      ? "Нет групп — нажми «↻ Telegram» или добавь чат вручную"
+      ? "Нет групп — нажми «Обновить» в шапке или добавь чат через «+ Чат»"
       : "Выбери аккаунт в фильтре — так список загрузится быстрее";
     body.innerHTML = `<tr><td colspan="9" class="empty-row">${hint}</td></tr>`;
     return;
@@ -3459,7 +3473,25 @@ function bindModal() {
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !document.getElementById("modalRoot").hidden) closeModal();
+    const root = document.getElementById("modalRoot");
+    if (root.hidden) return;
+    if (e.key === "Escape") { closeModal(); return; }
+    if (e.key === "Tab") {
+      const panel = document.getElementById("modalPanel");
+      const focusable = panel.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
   });
 }
 
@@ -4271,7 +4303,14 @@ async function init() {
     if (avatarEl) {
       avatarEl.title = meUser;
       avatarEl.style.cursor = "pointer";
-      avatarEl.addEventListener("click", () => { window.location.href = "/profile"; });
+      avatarEl.setAttribute("role", "button");
+      avatarEl.setAttribute("tabindex", "0");
+      avatarEl.setAttribute("aria-label", `Профиль: ${meUser}`);
+      const goProfile = () => { window.location.href = "/profile"; };
+      avatarEl.addEventListener("click", goProfile);
+      avatarEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goProfile(); }
+      });
     }
   }
 

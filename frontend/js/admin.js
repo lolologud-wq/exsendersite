@@ -351,7 +351,7 @@
     }
     body.innerHTML = items.map((p) => `
       <tr>
-        <td><code>${escapeHtml(p.code)}</code> ${p.active ? "" : '<span class="adm-pill adm-pill-off">off</span>'}</td>
+        <td><code>${escapeHtml(p.code)}</code> ${p.active ? "" : '<span class="adm-pill adm-pill-off">выкл</span>'}</td>
         <td>${p.discountPct ? p.discountPct + "%" : "—"}</td>
         <td>${p.bonusDays ? "+" + p.bonusDays + " дн." : "—"}</td>
         <td>${p.uses}${p.maxUses ? " / " + p.maxUses : ""}</td>
@@ -375,7 +375,7 @@
       <tr>
         <td>${escapeHtml(e.date || fmtDate(e.createdAt))}</td>
         <td><code>${escapeHtml(e.version || "—")}</code></td>
-        <td>${escapeHtml(e.title)}${e.published === false ? ' <span class="adm-pill adm-pill-off">draft</span>' : ""}</td>
+        <td>${escapeHtml(e.title)}${e.published === false ? ' <span class="adm-pill adm-pill-off">черновик</span>' : ""}</td>
         <td class="adm-actions">
           <button type="button" class="btn-ghost adm-btn-sm" data-cl-edit="${escapeHtml(e.id)}">ред.</button>
         </td>
@@ -417,21 +417,34 @@
     return u?.id || null;
   }
 
+  let loadInFlight = false;
   async function load() {
-    showAlert("");
-    const data = await api("GET", "/api/admin/stats");
-    renderStats(data);
-    renderChart(data.revenueChart, { revenueMonthUsd: data.revenueMonthUsd });
-    renderPayments(data.recentPayments);
-    renderUsers(data.recentUsers);
-    renderPromos(data.promos);
-    renderAudit(data.auditLog);
+    if (loadInFlight) return;
+    loadInFlight = true;
+    const refreshBtn = document.getElementById("admRefreshBtn");
+    if (refreshBtn) refreshBtn.disabled = true;
     try {
-      const cl = await api("GET", "/api/admin/changelog");
-      renderChangelog(cl.items);
-    } catch (_) { /* ignore */ }
-    const full = await api("GET", "/api/admin/users");
-    renderUsers(full.users);
+      showAlert("");
+      const data = await api("GET", "/api/admin/stats");
+      renderStats(data);
+      renderChart(data.revenueChart, { revenueMonthUsd: data.revenueMonthUsd });
+      renderPayments(data.recentPayments);
+      renderPromos(data.promos);
+      renderAudit(data.auditLog);
+      try {
+        const cl = await api("GET", "/api/admin/changelog");
+        renderChangelog(cl.items);
+      } catch (e) {
+        const body = document.getElementById("admChangelogBody");
+        if (body) body.innerHTML = '<tr><td colspan="4" class="adm-empty">Не удалось загрузить changelog</td></tr>';
+      }
+      // Render the full users list directly (avoids a flash from the short recent list).
+      const full = await api("GET", "/api/admin/users");
+      renderUsers(full.users);
+    } finally {
+      loadInFlight = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+    }
   }
 
   async function init() {

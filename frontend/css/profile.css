@@ -193,7 +193,7 @@
   justify-content: space-between;
   align-items: baseline;
 }
-.pf-plan-name { font-weight: 700; font-size: 17px; }
+.pf-plan-head .pf-plan-name { font-weight: 700; font-size: 17px; }
 .pf-plan-days { font-size: 12px; color: var(--text-mute); }
 .pf-plan-price {
   font-size: 36px;

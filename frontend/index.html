@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=20260530pie2" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob3" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
   <link rel="stylesheet" href="css/onboarding.css?v=20260608ob2" />
 </head>
 <body>
@@ -142,46 +142,48 @@
               <circle cx="11" cy="11" r="7"/>
               <path d="m20 20-3.5-3.5"/>
             </svg>
+            <label class="sr-only" for="accountSearch">Поиск по аккаунту</label>
             <input id="accountSearch" type="text" placeholder="Поиск по аккаунту…" />
           </div>
-          <select id="dashboardBotSelect" class="input bot-select" data-view-only="dashboard" title="VDS для сводки">
+          <select id="dashboardBotSelect" class="input bot-select" data-view-only="dashboard" title="VDS для сводки" aria-label="VDS для сводки">
             <option value="">Все VDS</option>
           </select>
-          <select id="accountsBotFilter" class="input bot-select" data-view-only="accounts" hidden title="Фильтр VDS">
+          <select id="accountsBotFilter" class="input bot-select" data-view-only="accounts" hidden title="Фильтр VDS" aria-label="Фильтр по VDS">
             <option value="">Все VDS</option>
           </select>
-          <select id="chatsBotFilter" class="input bot-select" data-view-only="chats" hidden title="Фильтр VDS">
+          <select id="chatsBotFilter" class="input bot-select" data-view-only="chats" hidden title="Фильтр VDS" aria-label="Фильтр по VDS">
             <option value="">Все VDS</option>
           </select>
-          <select id="chatsAccountFilter" class="input bot-select" data-view-only="chats" hidden title="Фильтр аккаунта">
+          <select id="chatsAccountFilter" class="input bot-select" data-view-only="chats" hidden title="Фильтр аккаунта" aria-label="Фильтр по аккаунту">
             <option value="">Все аккаунты</option>
           </select>
-          <select id="settingsBotSelect" class="input bot-select" data-view-only="settings" hidden title="VDS">
+          <select id="settingsBotSelect" class="input bot-select" data-view-only="settings" hidden title="VDS" aria-label="VDS">
             <option value="">— VDS —</option>
           </select>
-          <select id="settingsAccountSelect" class="input bot-select" data-view-only="settings" hidden title="Аккаунт">
+          <select id="settingsAccountSelect" class="input bot-select" data-view-only="settings" hidden title="Аккаунт" aria-label="Аккаунт">
             <option value="">— аккаунт —</option>
           </select>
-          <select id="sourcesBotSelect" class="input bot-select" data-view-only="sources" hidden title="VDS">
+          <select id="sourcesBotSelect" class="input bot-select" data-view-only="sources" hidden title="VDS" aria-label="VDS">
             <option value="">— VDS —</option>
           </select>
-          <select id="sourcesAccountSelect" class="input bot-select" data-view-only="sources" hidden title="Аккаунт">
+          <select id="sourcesAccountSelect" class="input bot-select" data-view-only="sources" hidden title="Аккаунт" aria-label="Аккаунт">
             <option value="">— аккаунт —</option>
           </select>
+          <label class="sr-only" for="chatsSearch">Поиск по чатам</label>
           <input id="chatsSearch" class="input mono chats-search" data-view-only="chats" hidden type="text" placeholder="Название или ID…" />
-          <button class="btn-primary" id="addSlotBtn" data-view-only="accounts" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          <button class="btn-primary" id="addSlotBtn" data-view-only="accounts" hidden aria-label="Добавить аккаунт">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span>Аккаунт</span>
           </button>
-          <button class="btn-ghost" id="uploadSessionBtn" data-view-only="accounts" hidden title="Загрузить .session">
+          <button class="btn-ghost" id="uploadSessionBtn" data-view-only="accounts" hidden title="Загрузить .session" aria-label="Загрузить .session">
             <span>.session</span>
           </button>
-          <button class="btn-primary" id="addChatBtn" data-view-only="chats" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          <button class="btn-primary" id="addChatBtn" data-view-only="chats" hidden aria-label="Добавить чат">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span>Чат</span>
           </button>
-          <button class="btn-primary" id="addServerBtn" data-view-only="servers" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          <button class="btn-primary" id="addServerBtn" data-view-only="servers" hidden aria-label="Добавить VDS">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span>VDS</span>
           </button>
           </div>
@@ -377,7 +379,7 @@
           </div>
           <div class="chats-bulk-left">
             <label class="switch switch-master" title="Включить / выключить все">
-              <input type="checkbox" id="chatsMasterToggle" />
+              <input type="checkbox" id="chatsMasterToggle" aria-label="Включить или выключить все чаты" />
               <span></span>
             </label>
             <span class="bulk-count" id="chatsBulkLabel">Все чаты</span>
@@ -540,7 +542,7 @@
   <!-- ============== MODAL ROOT ============== -->
   <div class="modal-root" id="modalRoot" hidden>
     <div class="modal-backdrop" data-modal-close></div>
-    <div class="modal-panel" id="modalPanel">
+    <div class="modal-panel" id="modalPanel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <div class="modal-head">
         <h3 id="modalTitle">—</h3>
         <button class="icon-btn ghost" data-modal-close aria-label="Закрыть">
@@ -558,6 +560,6 @@
   <script src="js/http.js" defer></script>
   <script src="js/impersonation.js?v=20260608imp1" defer></script>
   <script src="js/onboarding.js?v=20260608ob1" defer></script>
-  <script src="js/app.js?v=20260608app1" defer></script>
+  <script src="js/app.js?v=20260608ui1" defer></script>
 </body>
 </html>

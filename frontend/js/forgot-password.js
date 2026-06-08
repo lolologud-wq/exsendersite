@@ -57,6 +57,10 @@
         botStatus.textContent = data.status === "completed"
           ? "Пароль уже изменён. Можно войти."
           : "Время истекло — запросите сброс заново.";
+        if (data.status === "expired") {
+          token = "";
+          setTimeout(() => showStep("email"), 1500);
+        }
       }
     } catch (e) {
       console.warn("reset poll", e);
@@ -67,6 +71,8 @@
     e.preventDefault();
     showErr(errEl, "");
     const email = document.getElementById("fpEmail")?.value.trim();
+    const btn = document.getElementById("fpEmailBtn");
+    if (btn) btn.disabled = true;
     try {
       const res = await api("POST", "/api/auth/password-reset/start", { email });
       token = res.token || token;
@@ -81,6 +87,8 @@
       }
     } catch (err) {
       showErr(errEl, err.message);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
 
@@ -93,17 +101,25 @@
       showErr(passErrEl, "Пароли не совпадают");
       return;
     }
+    if (p1.length < 8 || !/[a-zA-Zа-яА-Я]/.test(p1) || !/\d/.test(p1)) {
+      showErr(passErrEl, "Минимум 8 символов, буквы и цифры");
+      return;
+    }
+    const btn = document.getElementById("fpPassBtn");
+    if (btn) btn.disabled = true;
     try {
       await api("POST", "/api/auth/password-reset/complete", { token, password: p1 });
       window.location.href = "/login";
     } catch (err) {
       showErr(passErrEl, err.message);
+      if (btn) btn.disabled = false;
     }
   });
 
   ensureCsrf().catch(() => {});
 
   if (token) {
+    showStep("bot");
     pollStatus().then(() => {
       if (!stepPass.hidden) return;
       showStep("bot");

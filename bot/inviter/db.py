@@ -73,6 +73,16 @@ def init_db(db_path: Path | None = None) -> Path:
             )
         except sqlite3.OperationalError:
             pass
+        for ddl in (
+            "ALTER TABLE parsed_chats ADD COLUMN traffic_category TEXT NOT NULL DEFAULT 'other'",
+            "ALTER TABLE parsed_chats ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE parsed_chats ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE parsed_chats ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -114,6 +124,121 @@ def mark_chat_parsed(
             (account_id, source_chat_id, source_chat_title, _utc_now()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def list_parsed_chats(
+    db_path: Path,
+    account_id: str,
+    *,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        where = "p.account_id = ?"
+        params: list[Any] = [account_id]
+        if not include_archived:
+            where += " AND COALESCE(p.archived_at, '') = ''"
+        rows = conn.execute(
+            f"""
+            SELECT
+                p.source_chat_id,
+                p.source_chat_title,
+                p.parsed_at,
+                COALESCE(p.traffic_category, 'other') AS traffic_category,
+                COALESCE(p.note, '') AS note,
+                COALESCE(p.archived_at, '') AS archived_at,
+                COALESCE(p.updated_at, '') AS updated_at,
+                COUNT(q.id) AS queue_count
+            FROM parsed_chats p
+            LEFT JOIN invite_queue q
+              ON q.account_id = p.account_id
+             AND q.source_chat_id = p.source_chat_id
+            WHERE {where}
+            GROUP BY p.source_chat_id
+            ORDER BY p.parsed_at DESC, p.id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_parsed_chat_meta(
+    db_path: Path,
+    account_id: str,
+    source_chat_id: str,
+    *,
+    traffic_category: str,
+    note: str,
+) -> dict[str, Any] | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            UPDATE parsed_chats
+            SET traffic_category = ?, note = ?, updated_at = ?
+            WHERE account_id = ? AND source_chat_id = ?
+            """,
+            (traffic_category, note, _utc_now(), account_id, source_chat_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT source_chat_id, source_chat_title, parsed_at,
+                   COALESCE(traffic_category, 'other') AS traffic_category,
+                   COALESCE(note, '') AS note,
+                   COALESCE(archived_at, '') AS archived_at,
+                   COALESCE(updated_at, '') AS updated_at
+            FROM parsed_chats
+            WHERE account_id = ? AND source_chat_id = ?
+            """,
+            (account_id, source_chat_id),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def set_parsed_chat_archived(
+    db_path: Path,
+    account_id: str,
+    source_chat_id: str,
+    *,
+    archived: bool,
+) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            """
+            UPDATE parsed_chats
+            SET archived_at = ?, updated_at = ?
+            WHERE account_id = ? AND source_chat_id = ?
+            """,
+            (_utc_now() if archived else "", _utc_now(), account_id, source_chat_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def clear_queue_for_source(db_path: Path, account_id: str, source_chat_id: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            """
+            DELETE FROM invite_queue
+            WHERE account_id = ? AND source_chat_id = ?
+            """,
+            (account_id, source_chat_id),
+        )
+        conn.commit()
+        return int(cur.rowcount)
     finally:
         conn.close()
 

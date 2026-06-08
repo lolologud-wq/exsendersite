@@ -10,7 +10,9 @@
   function fmtDate(d) {
     if (!d) return "";
     try {
-      return new Date(d + "T12:00:00").toLocaleDateString("ru-RU", {
+      const date = String(d).includes("T") ? new Date(d) : new Date(d + "T12:00:00");
+      if (isNaN(date.getTime())) return String(d);
+      return date.toLocaleDateString("ru-RU", {
         day: "numeric",
         month: "long",
         year: "numeric",
@@ -29,7 +31,7 @@
         <div class="cl-entry-head">
           <h2 class="cl-entry-title">${escapeHtml(entry.title)}</h2>
           ${entry.version ? `<span class="cl-version">v${escapeHtml(entry.version)}</span>` : ""}
-          <span class="cl-entry-meta">${escapeHtml(fmtDate(entry.date))}</span>
+          <span class="cl-entry-meta">${escapeHtml(fmtDate(entry.date) || fmtDate(entry.createdAt))}</span>
         </div>
         ${tags ? `<div class="cl-tags">${tags}</div>` : ""}
         <div class="cl-body-text">${escapeHtml(entry.body || "")}</div>
@@ -41,6 +43,7 @@
     if (!feed) return;
     try {
       const r = await fetch("/api/changelog");
+      if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
       const items = data.items || [];
       if (!items.length) {

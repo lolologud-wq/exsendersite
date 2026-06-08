@@ -11,6 +11,7 @@
   let activePromoCode = "";
   let useReferralBalance = true;
   let lastReferralBalance = 0;
+  let payReturnFocus = null;
 
   function isInviterHost() {
     return (window.location.hostname || "").toLowerCase().startsWith("inviter.");
@@ -229,16 +230,25 @@
     const link = document.getElementById("pfPayLink");
     link.href = data.payUrl || "#";
     link.hidden = !data.payUrl;
+    payReturnFocus = document.activeElement;
     modal.hidden = false;
+    document.body.style.overflow = "hidden";
+    const closeBtn = modal.querySelector(".pf-modal-x");
+    if (closeBtn) closeBtn.focus();
   }
 
   function closePayModal() {
     document.getElementById("pfPayModal").hidden = true;
+    document.body.style.overflow = "";
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
     activeInvoiceId = null;
+    if (payReturnFocus && typeof payReturnFocus.focus === "function") {
+      payReturnFocus.focus();
+    }
+    payReturnFocus = null;
   }
 
   async function pollInvoice(invoiceId) {
@@ -374,7 +384,7 @@
     if (refBalWrap && lastReferralBalance >= 0.01) {
       refBalWrap.hidden = false;
       if (refBalLabel) {
-        refBalLabel.innerHTML = `Списать реферальный баланс <b>(${escapeHtml(fmtUsd(lastReferralBalance))}</b> доступно)`;
+        refBalLabel.innerHTML = `Списать реферальный баланс <b>(${escapeHtml(fmtUsd(lastReferralBalance))})</b> доступно`;
       }
       if (refBalCheck) refBalCheck.checked = useReferralBalance;
     } else if (refBalWrap) {
@@ -419,7 +429,7 @@
       copyBtn.addEventListener("click", () => {
         const url = codeEl?.value || "";
         if (!url) return;
-        navigator.clipboard?.writeText(url).then(() => {
+        const onCopied = () => {
           showAlert("Ссылка скопирована", "ok");
           const span = copyBtn.querySelector("span");
           if (span) {
@@ -427,7 +437,23 @@
             span.textContent = "Скопировано";
             setTimeout(() => { span.textContent = prev; }, 2000);
           }
-        });
+        };
+        const fallbackCopy = () => {
+          try {
+            codeEl.removeAttribute("readonly");
+            codeEl.select();
+            document.execCommand("copy");
+            codeEl.setAttribute("readonly", "");
+            onCopied();
+          } catch (_) {
+            showAlert("Не удалось скопировать — выдели ссылку вручную", "err");
+          }
+        };
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(url).then(onCopied).catch(fallbackCopy);
+        } else {
+          fallbackCopy();
+        }
       });
     }
   }

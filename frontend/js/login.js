@@ -2,6 +2,7 @@
   const form = document.getElementById("loginForm");
   const errEl = document.getElementById("loginError");
   const btn = document.getElementById("loginBtn");
+  if (!form || !errEl || !btn) return;
 
   let nextPath = "";
   try {
@@ -28,11 +29,16 @@
     }
   }
 
+  const btnLabel = btn.querySelector("span") || btn;
+  const btnText = btnLabel.textContent;
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     errEl.hidden = true;
     errEl.textContent = "";
     btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    btnLabel.textContent = "Вход…";
 
     const login = document.getElementById("login").value.trim();
     const password = document.getElementById("password").value;
@@ -61,6 +67,8 @@
       errEl.hidden = false;
     } finally {
       btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+      btnLabel.textContent = btnText;
     }
   });
 

@@ -8,10 +8,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/profile.css?v=20260528chk2" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/profile.css?v=20260608ui1" />
   <link rel="stylesheet" href="css/onboarding.css?v=20260608ob2" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body class="pf-body">
 
@@ -34,7 +34,7 @@
     </button>
     <div class="pf-top-actions">
       <span class="pf-user" id="pfUserEmail">—</span>
-      <button class="btn-ghost" id="pfLogoutBtn">Выйти</button>
+      <button type="button" class="btn-ghost" id="pfLogoutBtn">Выйти</button>
     </div>
   </div>
 </header>
@@ -61,7 +61,7 @@
       </div>
     </section>
 
-    <section class="pf-alert" id="pfAlert" hidden></section>
+    <section class="pf-alert" id="pfAlert" role="alert" aria-live="assertive" hidden></section>
     <section class="pf-notify-list" id="pfNotifications" hidden></section>
 
     <section class="pf-section pf-referral" id="pfReferralSection" hidden>
@@ -96,7 +96,7 @@
       <h2 class="pf-h2">Тарифы</h2>
       <p class="pf-sub">Оплата USDT через @CryptoBot — активация моментальная после оплаты.</p>
       <div class="pf-promo-row">
-        <input class="input" id="pfPromoInput" placeholder="Промокод (опционально)" />
+        <input class="input" id="pfPromoInput" placeholder="Промокод (опционально)" aria-label="Промокод" />
         <button type="button" class="btn-ghost" id="pfPromoApply">Применить</button>
       </div>
       <p class="pf-promo-hint" id="pfPromoHint" hidden></p>
@@ -125,8 +125,8 @@
 <!-- Pay dialog -->
 <div class="pf-modal" id="pfPayModal" hidden>
   <div class="pf-modal-backdrop" data-pf-close></div>
-  <div class="pf-modal-card">
-    <button class="pf-modal-x" data-pf-close aria-label="Закрыть">×</button>
+  <div class="pf-modal-card" role="dialog" aria-modal="true" aria-labelledby="pfPayTitle">
+    <button type="button" class="pf-modal-x" data-pf-close aria-label="Закрыть">×</button>
     <h3 class="pf-modal-title" id="pfPayTitle">Оплата</h3>
     <p class="pf-modal-sub" id="pfPaySub">Открой @CryptoBot и оплати счёт. Доступ откроется автоматически.</p>
     <a class="btn-primary pf-pay-cta" id="pfPayLink" target="_blank" rel="noopener">Открыть @CryptoBot</a>
@@ -140,8 +140,8 @@
 </div>
 
   <script src="js/http.js" defer></script>
-  <script src="js/pf-nav.js" defer></script>
+  <script src="js/pf-nav.js?v=20260608ui1" defer></script>
   <script src="js/impersonation.js" defer></script>
-  <script src="js/profile.js?v=20260608pf1" defer></script>
+  <script src="js/profile.js?v=20260608ui1" defer></script>
 </body>
 </html>

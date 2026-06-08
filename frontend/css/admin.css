@@ -201,7 +201,7 @@
   display: block;
   width: 100%;
   height: auto;
-  touch-action: none;
+  touch-action: pan-y;
   cursor: crosshair;
 }
 .adm-rev-empty {

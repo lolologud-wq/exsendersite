@@ -5,6 +5,10 @@
     bots: [],
     flatAccounts: [],
     workspaceAccounts: [],
+    parsedItems: [],
+    parsedCategoryFilter: "",
+    parsedShowArchived: false,
+    overview: null,
     slotAuthorized: null,
     accountsBotFilter: "",
     jobTimer: null,
@@ -16,6 +20,7 @@
   const PAGE_META = {
     dashboard: { sub: "EX Inviter", title: "Дашборд" },
     parse: { sub: "EX Inviter", title: "Парс" },
+    parsed: { sub: "EX Inviter", title: "Parsed-чаты" },
     invite: { sub: "EX Inviter", title: "Инвайт" },
     accounts: { sub: "EX Inviter", title: "Аккаунты" },
     servers: { sub: "EX Inviter", title: "Серверы" },
@@ -27,6 +32,16 @@
     { value: 12, label: "12 ч" },
     { value: 24, label: "24 ч" },
     { value: 48, label: "48 ч" },
+  ];
+
+  const TRAFFIC_CATEGORIES = [
+    { value: "warm", label: "Тёплый" },
+    { value: "cold", label: "Холодный" },
+    { value: "crypto", label: "Крипта" },
+    { value: "business", label: "Бизнес" },
+    { value: "adult", label: "18+" },
+    { value: "mixed", label: "Смешанный" },
+    { value: "other", label: "Другое" },
   ];
 
   function $(id) { return document.getElementById(id); }
@@ -49,6 +64,25 @@
     if (h <= 0) return "Выкл";
     const opt = RESTART_INTERVAL_OPTIONS.find((o) => o.value === h);
     return opt ? opt.label : h + " ч";
+  }
+
+  function fmtDateTime(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return String(value);
+    return d.toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+  }
+
+  function categoryLabel(value) {
+    const found = TRAFFIC_CATEGORIES.find(function (cat) { return cat.value === value; });
+    return (found || TRAFFIC_CATEGORIES[TRAFFIC_CATEGORIES.length - 1]).label;
+  }
+
+  function categoryOptions(selected) {
+    return TRAFFIC_CATEGORIES.map(function (cat) {
+      return '<option value="' + escapeHtml(cat.value) + '"' + (cat.value === selected ? " selected" : "") + ">" +
+        escapeHtml(cat.label) + "</option>";
+    }).join("");
   }
 
   function botLabel(id) {
@@ -96,7 +130,8 @@
     if (!el) return;
     el.textContent = label;
     el.classList.toggle("on", on);
-    el.classList.toggle("off", !on);
+    el.classList.remove("off");
+    el.classList.toggle("neutral", !on);
   }
 
   function showAlert(msg, kind) {
@@ -155,7 +190,13 @@
     if (!bid) throw new Error("Выбери VDS");
     let url = "/api/inviter/bots/" + encodeURIComponent(bid) + "/" + sub.replace(/^\/+/, "");
     if (params) url += "?" + new URLSearchParams(params).toString();
-    return api(method, url, body);
+    return api(method, url, body).catch(function (err) {
+      const msg = String(err?.message || "");
+      if (msg === "Not Found" || msg.toLowerCase() === "not found" || /^HTTP 404$/i.test(msg)) {
+        throw new Error("На выбранной VDS не найден Inviter API. Обнови бота во вкладке «Серверы» (Deploy/Restart).");
+      }
+      throw err;
+    });
   }
 
   function panelApi(method, bid, sub, body) {
@@ -232,6 +273,10 @@
         await loadBots();
         await loadFlatAccounts();
         renderAccountsTable();
+      } else if (STATE.view === "parsed") {
+        await loadWorkspaceAccounts();
+        await refreshOverview();
+        await loadParsedSources();
       }
     } catch (e) {
       showAlert(e.message || String(e));
@@ -264,14 +309,14 @@
 
     const bot = STATE.bots.find(function (b) { return b.id === bid; });
     if (!bid) {
-      if (dot) dot.className = "dot-led off";
+      if (dot) dot.className = "dot-led neutral";
       if (slot) slot.textContent = "—";
       if (meta) meta.textContent = "Выбери VDS";
       if (hint) hint.textContent = "Можно взять VDS из exsender или добавить свой inviter";
       return;
     }
     if (!aid) {
-      if (dot) dot.className = "dot-led off";
+      if (dot) dot.className = "dot-led neutral";
       if (slot) slot.textContent = botLabel(bid);
       if (meta) meta.textContent = (isBorrowedBot(bot) ? "exsender · " : "inviter · ") + "выбери слот";
       if (hint) hint.textContent = isBorrowedBot(bot)
@@ -377,8 +422,8 @@
 
   function accountStatusBadge(a) {
     return a.authorized
-      ? '<span class="chip on">ok</span>'
-      : '<span class="chip off">login</span>';
+      ? '<span class="chip on">готов</span>'
+      : '<span class="chip off">нужен вход</span>';
   }
 
   function renderAccountsTable() {
@@ -420,6 +465,123 @@
           </td>
         </tr>`;
     }).join("");
+  }
+
+  async function loadParsedSources() {
+    const aid = selectedAccount();
+    const body = $("invParsedBody");
+    if (!aid || !selectedBot()) {
+      STATE.parsedItems = [];
+      if (body) body.innerHTML = '<tr><td colspan="6" class="empty-row">Выбери VDS и слот аккаунта</td></tr>';
+      setText("invParsedCount", "0");
+      renderSafetyPanel();
+      return;
+    }
+    const data = await botApi("GET", "parsed", undefined, {
+      accountId: aid,
+      includeArchived: STATE.parsedShowArchived ? "1" : "0",
+    });
+    STATE.parsedItems = data.items || [];
+    renderParsedTable();
+    renderSafetyPanel();
+  }
+
+  function filteredParsedItems() {
+    return STATE.parsedItems.filter(function (item) {
+      return !STATE.parsedCategoryFilter ||
+        (item.traffic_category || "other") === STATE.parsedCategoryFilter;
+    });
+  }
+
+  function parsedRow(item) {
+    const sourceId = String(item.source_chat_id || "");
+    const archived = !!item.archived_at;
+    const category = item.traffic_category || "other";
+    const queueCount = Number(item.queue_count || 0);
+    return `
+      <tr data-source="${escapeHtml(sourceId)}" class="${archived ? "row-archived" : ""}">
+        <td data-label="Источник">
+          <div class="account-meta">
+            <span class="account-name">${escapeHtml(item.source_chat_title || sourceId)}</span>
+            <span class="account-sub mono">${escapeHtml(sourceId)}</span>
+            ${archived ? '<span class="chip neutral">архив</span>' : ""}
+          </div>
+        </td>
+        <td data-label="Категория">
+          <select class="input inv-category-select" data-field="category" aria-label="Категория трафика">
+            ${categoryOptions(category)}
+          </select>
+        </td>
+        <td data-label="Заметка">
+          <textarea class="input inv-note-input" data-field="note" rows="2" maxlength="500" placeholder="Например: крипта, RU, тёплая база">${escapeHtml(item.note || "")}</textarea>
+        </td>
+        <td data-label="В очереди"><span class="chip ${queueCount > 0 ? "on" : "neutral"}">${queueCount}</span></td>
+        <td data-label="Парс"><span class="cell-dim">${escapeHtml(fmtDateTime(item.parsed_at))}</span></td>
+        <td data-label="Действия" class="td-actions">
+          <div class="row-actions inv-parsed-row-actions">
+            <button type="button" class="btn-primary" data-parsed="save">Сохранить</button>
+            <button type="button" class="btn-ghost" data-parsed="clear">Очистить очередь</button>
+            <button type="button" class="btn-ghost" data-parsed="archive">${archived ? "Вернуть" : "Архив"}</button>
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  function renderParsedTable() {
+    const body = $("invParsedBody");
+    if (!body) return;
+    const rows = filteredParsedItems();
+    setText("invParsedCount", String(rows.length));
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty-row">Отпаршенных источников пока нет</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(parsedRow).join("");
+  }
+
+  function renderSafetyPanel() {
+    const panel = $("invSafetyPanel");
+    if (!panel) return;
+    const warnings = [];
+    const aid = selectedAccount();
+    const ov = STATE.overview || {};
+    const queueCount = Number(ov.queueCount || 0);
+    const target = ov.target || {};
+    const delay = parseFloat($("invDelay")?.value || "3") || 0;
+    const limit = parseInt($("invLimit")?.value || "0", 10) || 0;
+
+    if (!selectedBot() || !aid) {
+      warnings.push("Выбери VDS и слот аккаунта перед запуском.");
+    } else if (STATE.slotAuthorized === false) {
+      warnings.push("Слот не авторизован в Telegram — сначала войди в аккаунт.");
+    }
+    if (!target.ref && !target.title) {
+      warnings.push("Целевой чат не выбран — инвайт не стартует без target.");
+    }
+    if (delay > 0 && delay < 3) {
+      warnings.push("Задержка меньше 3 сек повышает риск Flood/лимитов Telegram.");
+    }
+    if (queueCount > 300 && limit === 0) {
+      warnings.push("В очереди " + queueCount + " пользователей, а лимит = 0. Для безопасного запуска лучше поставить батч-лимит.");
+    }
+    const uncategorizedHeavy = STATE.parsedItems.filter(function (item) {
+      return Number(item.queue_count || 0) >= 100 &&
+        (item.traffic_category || "other") === "other" &&
+        !(item.note || "").trim();
+    });
+    if (uncategorizedHeavy.length) {
+      warnings.push("Есть крупные источники без категории/заметки: " + uncategorizedHeavy.length + ". Лучше пометить качество трафика во вкладке Parsed.");
+    }
+
+    if (!warnings.length) {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+    panel.innerHTML = '<b>Рекомендации по безопасности</b><ul>' +
+      warnings.map(function (w) { return "<li>" + escapeHtml(w) + "</li>"; }).join("") +
+      "</ul>";
   }
 
   function serverStatusBadge(s) {
@@ -466,7 +628,7 @@
     }
     body.innerHTML = rows.map(function (s) {
       const label = s.alias || s.host;
-      const reach = s.reachable ? '<span class="chip on">online</span>' : '<span class="chip off">offline</span>';
+      const reach = s.reachable ? '<span class="chip on">онлайн</span>' : '<span class="chip off">офлайн</span>';
       return `
         <tr data-id="${escapeHtml(s.id)}">
           <td data-label="Сервер">
@@ -497,7 +659,7 @@
     }
     body.innerHTML = rows.map(function (s) {
       const label = s.alias || s.host;
-      const reach = s.reachable ? '<span class="chip on">online</span>' : '<span class="chip off">offline</span>';
+      const reach = s.reachable ? '<span class="chip on">онлайн</span>' : '<span class="chip off">офлайн</span>';
       return `
         <tr data-id="${escapeHtml(s.id)}">
           <td data-label="Сервер">
@@ -520,19 +682,33 @@
     $("invModalBody").innerHTML = bodyHtml;
     $("invModalFoot").innerHTML = footHtml || "";
     const root = $("invModalRoot");
+    STATE.modalReturnFocus = document.activeElement;
     root.hidden = false;
-    requestAnimationFrame(function () { root.classList.add("in"); });
+    document.body.style.overflow = "hidden";
+    requestAnimationFrame(function () {
+      root.classList.add("in");
+      const panel = $("invModalPanel");
+      const focusTarget = panel && (panel.querySelector(
+        "input, select, textarea, button:not([data-inv-modal-close])"
+      ) || panel.querySelector("[data-inv-modal-close]"));
+      if (focusTarget) focusTarget.focus();
+    });
   }
 
   function closeModal() {
     const root = $("invModalRoot");
     root.classList.remove("in");
+    document.body.style.overflow = "";
     if (STATE.serverLogPoll) {
       clearInterval(STATE.serverLogPoll);
       STATE.serverLogPoll = null;
     }
     STATE.serverLogTarget = null;
     setTimeout(function () { root.hidden = true; }, 180);
+    if (STATE.modalReturnFocus && typeof STATE.modalReturnFocus.focus === "function") {
+      STATE.modalReturnFocus.focus();
+    }
+    STATE.modalReturnFocus = null;
   }
 
   function modalFoot(submitLabel, danger) {
@@ -544,6 +720,27 @@
   function bindModal() {
     document.body.addEventListener("click", function (e) {
       if (e.target.closest("[data-inv-modal-close]")) closeModal();
+    });
+    document.addEventListener("keydown", function (e) {
+      const root = $("invModalRoot");
+      if (!root || root.hidden) return;
+      if (e.key === "Escape") { closeModal(); return; }
+      if (e.key === "Tab") {
+        const panel = $("invModalPanel");
+        const focusable = panel.querySelectorAll(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     });
   }
 
@@ -735,11 +932,17 @@
   async function refreshOverview() {
     const aid = selectedAccount();
     if (!aid || !selectedBot()) {
+      STATE.overview = null;
       clearOverviewStats();
-      renderParse({ running: false, progress: 0, phase: "", sourceTitle: "", lastError: "", result: {} });
+      renderParse(IDLE_PARSE);
+      renderJob(IDLE_JOB);
+      const targetRef = $("invTargetRef");
+      if (targetRef) targetRef.value = "";
+      renderSafetyPanel();
       return;
     }
     const data = await botApi("GET", "overview", undefined, { accountId: aid });
+    STATE.overview = data;
     STATE.slotAuthorized = !!data.authorized;
     const target = data.target || {};
     setText("invStatQueue", String(data.queueCount || 0));
@@ -747,9 +950,10 @@
     setText("invStatTarget", target.title || target.ref || "—");
     setText("invStatTargetSub", target.ref ? String(target.ref) : "не выбран");
     if (target.ref) $("invTargetRef").value = target.ref;
-    if (data.parse) renderParse(data.parse);
-    if (data.job) renderJob(data.job);
+    renderParse(data.parse || IDLE_PARSE);
+    renderJob(data.job || IDLE_JOB);
     updateSlotStatus();
+    renderSafetyPanel();
   }
 
   function parsePhaseLabel(phase) {
@@ -1052,9 +1256,9 @@
           ? "Уже парсился: " + (result.sourceChatTitle || title)
           : err || "Нет активного парса");
 
-    setChip($("invParseChip"), running, running ? "parsing" : "parse idle");
-    setChip($("invParseStatusChip"), running, running ? "parsing" : "idle");
-    setChip($("invDashParseChip"), running, running ? "parsing" : "idle");
+    setChip($("invParseChip"), running, running ? "парс идёт" : "парс ждёт");
+    setChip($("invParseStatusChip"), running, running ? "парсинг" : "ожидание");
+    setChip($("invDashParseChip"), running, running ? "парсинг" : "ожидание");
     setText("invParseStatusSub", sub);
     setText("invDashParseSub", sub);
 
@@ -1117,7 +1321,7 @@
     const progress = data.progress || 0;
     const total = data.total || 0;
     const donePctLabel = jobPctLabel(progress, total);
-    setChip($("invJobChip"), running, running ? "running" : "idle");
+    setChip($("invJobChip"), running, running ? "инвайт идёт" : "инвайт ждёт");
     setText("invStatProgress", total > 0 ? progress + "/" + total : "—");
     const summary = summarizeJobStats(data.stats);
     const errPctLabel = progress > 0 ? jobPctLabel(summary.err, progress) : "0%";
@@ -1141,9 +1345,13 @@
       lastInviteSec: data.lastInviteSec || 0,
     };
     renderTaskPanel("invJobLog", panelOpts);
-    setChip($("invDashInviteChip"), running, running ? "running" : "idle");
+    setChip($("invDashInviteChip"), running, running ? "идёт" : "ожидание");
     setText("invDashInviteSub", running ? "Инвайт " + progress + " из " + total : "Job не запущен");
     renderTaskPanel("invDashInviteLog", panelOpts);
+    const runBtn = $("invRunBtn");
+    const stopBtn = $("invStopBtn");
+    if (runBtn) runBtn.disabled = running;
+    if (stopBtn) stopBtn.disabled = !running;
   }
 
   async function refreshJob() {
@@ -1194,6 +1402,7 @@
       try {
         await loadWorkspaceAccounts();
         updateSlotStatus();
+        await refreshOverview();
         showAlert("VDS exsender выбран: " + botLabel(btn.dataset.id), "ok");
       } catch (err) { showAlert(err.message); }
     });
@@ -1250,6 +1459,54 @@
           renderAccountsTable();
           if (STATE.view === "dashboard" || STATE.view === "parse" || STATE.view === "invite") await loadWorkspaceAccounts();
         } catch (err) { showAlert(err.message); }
+      }
+    });
+    $("invParsedBody")?.addEventListener("click", async function (e) {
+      const btn = e.target.closest("button[data-parsed]");
+      if (!btn) return;
+      const tr = btn.closest("tr[data-source]");
+      const sourceId = tr?.dataset.source || "";
+      const aid = selectedAccount();
+      if (!sourceId || !aid) return;
+      const action = btn.dataset.parsed;
+      try {
+        if (action === "save") {
+          const category = tr.querySelector("[data-field='category']")?.value || "other";
+          const note = tr.querySelector("[data-field='note']")?.value || "";
+          btn.disabled = true;
+          await botApi("PATCH", "parsed/" + encodeURIComponent(sourceId), {
+            accountId: aid,
+            trafficCategory: category,
+            note: note,
+          });
+          showAlert("Источник обновлён", "ok");
+          await loadParsedSources();
+          return;
+        }
+        if (action === "clear") {
+          if (!confirm("Очистить очередь по этому источнику? Parsed-запись и заметка останутся.")) return;
+          btn.disabled = true;
+          const res = await botApi("POST", "parsed/" + encodeURIComponent(sourceId) + "/clear_queue", { accountId: aid });
+          showAlert("Удалено из очереди: " + (res.removed || 0), "ok");
+          await loadParsedSources();
+          await refreshOverview();
+          return;
+        }
+        if (action === "archive") {
+          const item = STATE.parsedItems.find(function (x) { return String(x.source_chat_id) === sourceId; });
+          const archived = !item?.archived_at;
+          btn.disabled = true;
+          await botApi("POST", "parsed/" + encodeURIComponent(sourceId) + "/archive", {
+            accountId: aid,
+            archived: archived,
+          });
+          showAlert(archived ? "Источник в архиве" : "Источник возвращён", "ok");
+          await loadParsedSources();
+        }
+      } catch (err) {
+        showAlert(err.message);
+      } finally {
+        btn.disabled = false;
       }
     });
   }
@@ -1346,16 +1603,34 @@
       STATE.accountsBotFilter = e.target.value;
       renderAccountsTable();
     });
+    $("invParsedCategoryFilter")?.addEventListener("change", function (e) {
+      STATE.parsedCategoryFilter = e.target.value;
+      renderParsedTable();
+      renderSafetyPanel();
+    });
+    $("invParsedShowArchived")?.addEventListener("change", function (e) {
+      STATE.parsedShowArchived = !!e.target.checked;
+      loadParsedSources().catch(function (err) { showAlert(err.message); });
+    });
+    ["invLimit", "invDelay"].forEach(function (id) {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener("input", renderSafetyPanel);
+      el.addEventListener("change", renderSafetyPanel);
+    });
 
     $("invBotSelect").addEventListener("change", async function () {
       try {
         await loadWorkspaceAccounts();
         await refreshOverview();
         await refreshJob();
+        if (STATE.view === "parsed") await loadParsedSources();
       } catch (e) { showAlert(e.message); }
     });
     $("invAccountSelect").addEventListener("change", function () {
-      refreshOverview().catch(function (e) { showAlert(e.message); });
+      refreshOverview()
+        .then(function () { if (STATE.view === "parsed") return loadParsedSources(); })
+        .catch(function (e) { showAlert(e.message); });
     });
 
     $("invParseBtn").addEventListener("click", async function () {
@@ -1411,9 +1686,12 @@
     });
 
     $("invRunBtn").addEventListener("click", async function () {
+      const btn = $("invRunBtn");
+      const prev = btn ? btn.textContent : "Запуск";
       try {
         const aid = selectedAccount();
         if (!aid) throw new Error("Выбери слот");
+        if (btn) { btn.disabled = true; btn.textContent = "Запуск…"; }
         await botApi("POST", "run", {
           accountId: aid,
           limit: parseInt($("invLimit").value || "0", 10) || 0,
@@ -1422,7 +1700,11 @@
         showAlert("Инвайт запущен", "ok");
         await refreshJob();
         if (!STATE.jobTimer) STATE.jobTimer = setInterval(refreshJob, 1500);
-      } catch (e) { showAlert(e.message); }
+      } catch (e) {
+        showAlert(e.message);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prev; }
+      }
     });
 
     $("invStopBtn").addEventListener("click", async function () {

@@ -4,6 +4,7 @@
     const nav = document.getElementById("pfMobileNav");
     const backdrop = document.getElementById("pfMobileBackdrop");
     if (!btn || !nav) return;
+    btn.setAttribute("aria-controls", "pfMobileNav");
 
     function setOpen(open) {
       document.body.classList.toggle("pf-menu-open", open);

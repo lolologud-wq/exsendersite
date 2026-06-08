@@ -8,8 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=verify3" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body class="login-body">
   <div class="login-wrap">
@@ -44,7 +44,7 @@
             <input class="input" id="website" name="_website" type="text" tabindex="-1" autocomplete="off" />
           </div>
 
-          <p class="login-error" id="registerError" hidden></p>
+          <p class="login-error" id="registerError" role="alert" aria-live="assertive" hidden></p>
 
           <button type="submit" class="btn-primary login-submit" id="registerBtn">
             <span>Продолжить</span>
@@ -78,12 +78,12 @@
             <span id="verifyBotLabel">Открыть бота в Telegram</span>
           </a>
 
-          <div class="register-verify-status" id="verifyWait">
+          <div class="register-verify-status" id="verifyWait" role="status" aria-live="polite">
             <span class="register-verify-pulse" aria-hidden="true"></span>
             <span class="register-verify-status-text">Ожидаем подтверждение…</span>
           </div>
 
-          <p class="login-error" id="verifyError" hidden></p>
+          <p class="login-error" id="verifyError" role="alert" aria-live="assertive" hidden></p>
 
           <button type="button" class="btn-ghost login-submit" id="verifyBackBtn">
             Назад к форме

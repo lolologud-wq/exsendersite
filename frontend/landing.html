@@ -22,8 +22,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/landing.css" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link rel="stylesheet" href="css/landing.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body class="lp-body">
 
@@ -37,35 +37,36 @@
 
     <nav class="lp-nav-links" aria-label="Разделы">
       <a href="#features">Возможности</a>
-      <a href="#process">Как работает</a>
       <a href="#control">Контроль</a>
+      <a href="#process">Как работает</a>
       <a href="#pricing">Тарифы</a>
       <a href="#faq">FAQ</a>
       <a href="/changelog">Changelog</a>
     </nav>
 
     <div class="lp-nav-cta">
-      <a class="btn-ghost" href="/login">Войти</a>
+      <a class="btn-ghost" href="/login" id="lpNavLogin">Войти</a>
       <a class="btn-ghost" href="/profile" id="lpNavProfile" hidden>Профиль</a>
       <a class="btn-primary" href="/register">Начать</a>
     </div>
 
-    <button class="lp-burger" id="lpBurger" aria-label="Меню" aria-expanded="false">
+    <button type="button" class="lp-burger" id="lpBurger" aria-label="Меню" aria-expanded="false" aria-controls="lpMobileMenu">
       <span></span><span></span><span></span>
     </button>
   </div>
-  <div class="lp-mobile-menu" id="lpMobileMenu" hidden>
+  <nav class="lp-mobile-menu" id="lpMobileMenu" aria-label="Мобильное меню" hidden>
     <a href="#features">Возможности</a>
-    <a href="#process">Как работает</a>
     <a href="#control">Контроль</a>
+    <a href="#process">Как работает</a>
     <a href="#pricing">Тарифы</a>
     <a href="#faq">FAQ</a>
     <a href="/changelog">Changelog</a>
     <div class="lp-mobile-cta">
-      <a class="btn-ghost" href="/login">Войти</a>
+      <a class="btn-ghost" href="/login" id="lpMobileLogin">Войти</a>
+      <a class="btn-ghost" href="/profile" id="lpMobileProfile" hidden>Профиль</a>
       <a class="btn-primary" href="/register">Начать</a>
     </div>
-  </div>
+  </nav>
 </header>
 
 <!-- ====================== HERO ====================== -->
@@ -444,6 +445,6 @@
   </div>
 </footer>
 
-<script src="js/landing.js" defer></script>
+<script src="js/landing.js?v=20260608ui1" defer></script>
 </body>
 </html>

@@ -8,14 +8,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body class="login-body">
   <div class="login-wrap">
     <div class="login-card">
       <div class="login-brand">
-        <span class="logo-mark">e</span>
+        <a href="/" class="logo-mark" aria-label="На главную">e</a>
         <div>
           <h1 class="login-title">exsender</h1>
           <p class="login-sub">Панель управления рассылкой</p>
@@ -31,7 +31,7 @@
           <label class="field-label" for="password">Пароль</label>
           <input class="input" id="password" name="password" type="password" required autocomplete="current-password" />
         </div>
-        <p class="login-error" id="loginError" hidden></p>
+        <p class="login-error" id="loginError" role="alert" aria-live="assertive" hidden></p>
         <button type="submit" class="btn-primary login-submit" id="loginBtn">
           <span>Войти</span>
         </button>
@@ -44,6 +44,6 @@
     </div>
   </div>
   <script src="js/http.js" defer></script>
-  <script src="js/login.js" defer></script>
+  <script src="js/login.js?v=20260608ui1" defer></script>
 </body>
 </html>

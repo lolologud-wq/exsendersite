@@ -9,10 +9,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=20260606inv3" />
-  <link rel="stylesheet" href="css/inviter.css?v=20260606vis4" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/inviter.css?v=20260608ui1" />
   <link rel="stylesheet" href="css/onboarding.css?v=20260608ob2" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob3" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body>
   <div class="app">
@@ -39,6 +39,13 @@
             <path d="M8 11h6M11 8v6"/>
           </svg>
           <span>Парс</span>
+        </a>
+        <a href="#" class="nav-item" data-page="parsed">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 6h16M4 12h16M4 18h10"/>
+            <circle cx="18" cy="18" r="2"/>
+          </svg>
+          <span>Parsed</span>
         </a>
         <a href="#" class="nav-item" data-page="invite">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -119,8 +126,8 @@
         </div>
         <div class="topbar-right">
           <div class="topbar-actions">
-            <span class="chip off" id="invParseChip" data-view-only="dashboard,parse,invite">parse idle</span>
-            <span class="chip off" id="invJobChip" data-view-only="dashboard,invite">invite idle</span>
+            <span class="chip neutral" id="invParseChip" data-view-only="dashboard,parse,invite">парс ждёт</span>
+            <span class="chip neutral" id="invJobChip" data-view-only="dashboard,invite">инвайт ждёт</span>
             <button type="button" class="btn-primary" id="invAddServerBtn" data-view-only="servers" hidden>+ VDS</button>
             <button type="button" class="btn-primary" id="invAddAccountBtn" data-view-only="accounts" hidden>+ Аккаунт</button>
             <button type="button" class="btn-ghost" id="invRefreshBtn">
@@ -136,8 +143,8 @@
 
       <div class="inv-alerts">
         <div id="invNotifyHost"></div>
-        <div class="inv-alert inv-alert-err" id="invAlert" hidden></div>
-        <div class="inv-alert inv-alert-ok" id="invOk" hidden></div>
+        <div class="inv-alert inv-alert-err" id="invAlert" role="alert" aria-live="assertive" hidden></div>
+        <div class="inv-alert inv-alert-ok" id="invOk" role="status" aria-live="polite" hidden></div>
       </div>
 
       <!-- shared bot/account picker -->
@@ -176,7 +183,7 @@
             <span class="stat-sub">источников в базе</span>
           </article>
           <article class="stat-card highlight">
-            <span class="stat-label">Target чат</span>
+            <span class="stat-label">Целевой чат</span>
             <span class="stat-value sm" id="invStatTarget">—</span>
             <span class="stat-sub" id="invStatTargetSub">не выбран</span>
           </article>
@@ -194,7 +201,7 @@
                 <h3>Парс</h3>
                 <p class="inv-activity-sub" id="invDashParseSub">Нет активного парса</p>
               </div>
-              <span class="chip off" id="invDashParseChip">idle</span>
+              <span class="chip neutral" id="invDashParseChip">ожидание</span>
             </div>
             <div class="inv-task-panel" id="invDashParseLog"></div>
             <button type="button" class="btn-ghost inv-dash-link" data-goto="parse">Открыть парс →</button>
@@ -206,7 +213,7 @@
                 <h3>Инвайт</h3>
                 <p class="inv-activity-sub" id="invDashInviteSub">Job не запущен</p>
               </div>
-              <span class="chip off" id="invDashInviteChip">idle</span>
+              <span class="chip neutral" id="invDashInviteChip">ожидание</span>
             </div>
             <div class="inv-task-panel" id="invDashInviteLog"></div>
             <button type="button" class="btn-ghost inv-dash-link" data-goto="invite">Открыть инвайт →</button>
@@ -239,9 +246,53 @@
               <h3>Статус парса</h3>
               <p class="inv-activity-sub" id="invParseStatusSub">Ожидание запуска</p>
             </div>
-            <span class="chip off" id="invParseStatusChip">idle</span>
+            <span class="chip neutral" id="invParseStatusChip">ожидание</span>
           </div>
           <div class="inv-task-panel" id="invParseLog"></div>
+        </section>
+      </div>
+
+      <!-- PARSED SOURCES -->
+      <div data-view="parsed" hidden>
+        <section class="card table-card">
+          <div class="card-head">
+            <div>
+              <h3>Отпаршенные источники</h3>
+              <p class="inv-activity-sub">Категории, заметки и очистка очереди по source-чату.</p>
+            </div>
+            <div class="card-actions inv-parsed-actions">
+              <select class="input inv-bot-filter" id="invParsedCategoryFilter" aria-label="Фильтр категории">
+                <option value="">Все категории</option>
+                <option value="warm">Тёплый</option>
+                <option value="cold">Холодный</option>
+                <option value="crypto">Крипта</option>
+                <option value="business">Бизнес</option>
+                <option value="adult">18+</option>
+                <option value="mixed">Смешанный</option>
+                <option value="other">Другое</option>
+              </select>
+              <label class="check inv-archive-check">
+                <input type="checkbox" id="invParsedShowArchived" />
+                Архив
+              </label>
+              <span class="chip" id="invParsedCount">0</span>
+            </div>
+          </div>
+          <div class="table-wrap table-cards">
+            <table class="purchases inv-parsed-table">
+              <thead>
+                <tr>
+                  <th>Источник</th>
+                  <th>Категория</th>
+                  <th>Заметка</th>
+                  <th>В очереди</th>
+                  <th>Парс</th>
+                  <th class="th-actions">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="invParsedBody"></tbody>
+            </table>
+          </div>
         </section>
       </div>
 
@@ -249,7 +300,7 @@
       <div data-view="invite" hidden>
         <div class="inv-grid">
           <section class="card">
-            <div class="card-head"><h3>Target чат</h3></div>
+            <div class="card-head"><h3>Целевой чат</h3></div>
             <div class="form-grid">
               <label class="field">
                 <span class="field-label">Куда инвайтить</span>
@@ -262,7 +313,7 @@
                 </select>
               </label>
               <div class="inv-actions">
-                <button type="button" class="btn-primary" id="invTargetBtn">Сохранить target</button>
+                <button type="button" class="btn-primary" id="invTargetBtn">Сохранить цель</button>
                 <button type="button" class="btn-ghost" id="invDialogsBtn">Обновить чаты</button>
               </div>
             </div>
@@ -287,6 +338,7 @@
                   <input class="input" id="invDelay" type="number" min="0" step="0.1" value="3" />
                 </label>
               </div>
+              <div class="callout inv-safety-panel" id="invSafetyPanel" hidden></div>
               <div class="inv-task-panel" id="invJobLog"></div>
             </div>
           </section>
@@ -299,7 +351,7 @@
           <div class="card-head">
             <h3>Аккаунты</h3>
             <div class="card-actions">
-              <select class="input" id="invAccountsBotFilter" style="min-width:160px;">
+              <select class="input inv-bot-filter" id="invAccountsBotFilter" aria-label="Фильтр по VDS">
                 <option value="">Все VDS</option>
               </select>
               <span class="chip" id="invAccountsCount">0</span>
@@ -382,7 +434,7 @@
 
   <div class="modal-root" id="invModalRoot" hidden>
     <div class="modal-backdrop" data-inv-modal-close></div>
-    <div class="modal-panel" id="invModalPanel">
+    <div class="modal-panel" id="invModalPanel" role="dialog" aria-modal="true" aria-labelledby="invModalTitle">
       <div class="modal-head">
         <h3 id="invModalTitle">—</h3>
         <button type="button" class="icon-btn" data-inv-modal-close aria-label="Закрыть">
@@ -397,6 +449,6 @@
   <script src="js/http.js?v=20260606csrf2" defer></script>
   <script src="js/impersonation.js?v=20260608imp1" defer></script>
   <script src="js/onboarding.js?v=20260608ob1" defer></script>
-  <script src="js/inviter.js?v=20260608inv1" defer></script>
+  <script src="js/inviter.js?v=20260608ui1" defer></script>
 </body>
 </html>

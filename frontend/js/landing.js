@@ -21,13 +21,21 @@
     if (window.innerWidth > 720) setOpen(false);
   });
 
-  // Show profile link if already logged in
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("lp-menu-open")) setOpen(false);
+  });
+
+  // Swap auth CTAs (login -> profile) on both desktop and mobile if already logged in
   fetch("/api/auth/me", { credentials: "same-origin" })
     .then((r) => r.json())
     .then((data) => {
       if (!data?.user) return;
-      const prof = document.getElementById("lpNavProfile");
-      if (prof) prof.hidden = false;
+      [["lpNavProfile", "lpNavLogin"], ["lpMobileProfile", "lpMobileLogin"]].forEach(([profId, loginId]) => {
+        const prof = document.getElementById(profId);
+        const login = document.getElementById(loginId);
+        if (prof) prof.hidden = false;
+        if (login) login.hidden = true;
+      });
     })
     .catch(() => {});
 

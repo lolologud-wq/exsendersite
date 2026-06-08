@@ -315,6 +315,66 @@ def build_app(
             raise HTTPException(status_code=503, detail="inviter disabled")
         return inv.get_queue(accountId, limit=limit)
 
+    @app.get("/api/local/inviter/parsed", dependencies=[Depends(require_token)])
+    async def inviter_parsed(
+        accountId: str = "",
+        includeArchived: bool = False,
+    ) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        return inv.list_parsed_chats(accountId, include_archived=includeArchived)
+
+    @app.patch(
+        "/api/local/inviter/parsed/{source_chat_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def inviter_parsed_update(
+        source_chat_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        return inv.update_parsed_chat(
+            str(body.get("accountId", body.get("account_id", ""))),
+            source_chat_id,
+            traffic_category=str(body.get("trafficCategory", body.get("traffic_category", "other"))),
+            note=str(body.get("note", "")),
+        )
+
+    @app.post(
+        "/api/local/inviter/parsed/{source_chat_id}/archive",
+        dependencies=[Depends(require_token)],
+    )
+    async def inviter_parsed_archive(
+        source_chat_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        return inv.archive_parsed_chat(
+            str(body.get("accountId", body.get("account_id", ""))),
+            source_chat_id,
+            archived=bool(body.get("archived", True)),
+        )
+
+    @app.post(
+        "/api/local/inviter/parsed/{source_chat_id}/clear_queue",
+        dependencies=[Depends(require_token)],
+    )
+    async def inviter_parsed_clear_queue(
+        source_chat_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if inv is None:
+            raise HTTPException(status_code=503, detail="inviter disabled")
+        body = payload or {}
+        return inv.clear_parsed_source_queue(
+            str(body.get("accountId", body.get("account_id", ""))),
+            source_chat_id,
+        )
+
     @app.post("/api/local/inviter/run", dependencies=[Depends(require_token)])
     async def inviter_run(payload: dict[str, Any]) -> dict[str, Any]:
         if inv is None:

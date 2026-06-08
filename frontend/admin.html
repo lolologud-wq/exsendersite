@@ -8,10 +8,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
-  <link rel="stylesheet" href="css/profile.css" />
-  <link rel="stylesheet" href="css/admin.css?v=20260606usage" />
-  <link rel="stylesheet" href="css/mobile.css?v=20260528mob" />
+  <link rel="stylesheet" href="css/style.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/profile.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/admin.css?v=20260608ui1" />
+  <link rel="stylesheet" href="css/mobile.css?v=20260608ui1" />
 </head>
 <body class="pf-body adm-body">
 
@@ -42,6 +42,7 @@
 <div class="pf-mobile-backdrop" id="pfMobileBackdrop" hidden aria-hidden="true"></div>
 <nav class="pf-mobile-nav" id="pfMobileNav" aria-label="Навигация">
   <a href="/admin" class="active">Админ</a>
+  <a href="https://inviter.exsender.top" target="_blank" rel="noopener noreferrer">Inviter</a>
   <a href="/app">Панель</a>
   <a href="/changelog">Changelog</a>
 </nav>
@@ -57,8 +58,8 @@
       <button class="btn-ghost" id="admRefreshBtn">↻ Обновить</button>
     </div>
 
-    <section class="adm-alert" id="admAlert" hidden></section>
-    <section class="adm-alert adm-alert-ok" id="admOk" hidden></section>
+    <section class="adm-alert adm-alert-err" id="admAlert" role="alert" aria-live="assertive" hidden></section>
+    <section class="adm-alert adm-alert-ok" id="admOk" role="status" aria-live="polite" hidden></section>
 
     <section class="adm-stats" id="admStats">
       <article class="adm-stat"><span class="adm-stat-label">Выручка всего</span><b class="adm-stat-value" id="statRevenueTotal">—</b></article>
@@ -113,7 +114,7 @@
       </form>
       <div class="adm-table-wrap adm-mt">
         <table class="adm-table">
-          <thead><tr><th>Код</th><th>Скидка</th><th>Бонус</th><th>Uses</th><th></th></tr></thead>
+          <thead><tr><th>Код</th><th>Скидка</th><th>Бонус</th><th>Применений</th><th></th></tr></thead>
           <tbody id="admPromosBody"><tr><td colspan="5" class="adm-empty">—</td></tr></tbody>
         </table>
       </div>
@@ -202,7 +203,7 @@
 </main>
 
   <script src="js/http.js" defer></script>
-  <script src="js/pf-nav.js" defer></script>
-  <script src="js/admin.js?v=20260608imp2" defer></script>
+  <script src="js/pf-nav.js?v=20260608ui1" defer></script>
+  <script src="js/admin.js?v=20260608ui1" defer></script>
 </body>
 </html>
