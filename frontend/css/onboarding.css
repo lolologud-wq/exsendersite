@@ -63,8 +63,16 @@
   flex-wrap: wrap;
   padding: 10px 16px;
   background: rgba(251, 191, 36, 0.12);
-  border-bottom: 1px solid rgba(251, 191, 36, 0.35);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--r-md, 14px);
   color: #fde68a;
   font-size: 13px;
+  /* Banner is injected as the first child of .app, which is a CSS grid on
+     /app and /inviter. Without these it would occupy a single grid cell and
+     break the whole layout — span the full width and always sit on top. */
+  grid-column: 1 / -1;
+  order: -1;
+  width: 100%;
+  margin-bottom: 4px;
 }
 .imp-banner b { color: #fff; }
