@@ -205,6 +205,12 @@
     return api(method, url, body);
   }
 
+  function updateTopbarBack(view) {
+    const back = $("backBtn");
+    if (!back) return;
+    back.hidden = view === "dashboard";
+  }
+
   function bindSidebar() {
     function setSidebarOpen(open) {
       document.body.classList.toggle("sidebar-open", open);
@@ -216,6 +222,10 @@
         backdrop.setAttribute("aria-hidden", open ? "false" : "true");
       }
     }
+    $("backBtn")?.addEventListener("click", function () {
+      setSidebarOpen(false);
+      switchView("dashboard");
+    });
     $("menuBtn")?.addEventListener("click", function () {
       setSidebarOpen(!document.body.classList.contains("sidebar-open"));
     });
@@ -250,6 +260,7 @@
     const meta = PAGE_META[name] || PAGE_META.dashboard;
     setText("invTopSub", meta.sub);
     setText("invTopTitle", meta.title);
+    updateTopbarBack(name);
     refreshCurrentView();
   }
 

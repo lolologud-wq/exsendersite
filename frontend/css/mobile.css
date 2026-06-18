@@ -426,6 +426,19 @@ body.pf-menu-open {
   color: var(--text);
 }
 
+.pf-back-btn {
+  display: none;
+  flex-shrink: 0;
+}
+
+.pf-nav-back {
+  margin-bottom: 8px;
+  padding-bottom: 14px !important;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-dim) !important;
+  font-weight: 600 !important;
+}
+
 @media (max-width: 768px) {
   .pf-container {
     padding: 0 16px;
@@ -439,6 +452,10 @@ body.pf-menu-open {
 
   .pf-topnav {
     display: none;
+  }
+
+  .pf-back-btn {
+    display: grid;
   }
 
   .pf-user {

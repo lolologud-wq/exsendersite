@@ -237,7 +237,9 @@ input::placeholder, textarea::placeholder { color: var(--text-dim); opacity: 0.7
 .topbar h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
 .topbar .sub { color: var(--text-mute); font-size: 13px; margin-top: 2px; }
 
-.menu-btn { display: none; flex-shrink: 0; }
+.menu-btn,
+.back-btn { display: none; flex-shrink: 0; }
+.back-btn:not([hidden]) { display: grid; }
 
 .topbar-right {
   display: flex;
@@ -1490,6 +1492,10 @@ code {
   }
 
   .menu-btn { display: grid; }
+
+  .topbar-left:has(.back-btn:not([hidden])) .menu-btn {
+    display: none;
+  }
 
   .sidebar {
     position: fixed;

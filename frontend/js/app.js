@@ -433,10 +433,6 @@ function aggregateOverview(packs) {
 async function fetchAllOverviews() {
   if (!STATE.bots.length) await loadBots();
   const targets = STATE.bots.filter((bot) => bot.hasApiToken || bot.status !== "new");
-  if (STATE.allOverviews.length && targets.length === STATE.allOverviews.length) {
-    const age = Date.now() - (STATE.botsLoadedAt || 0);
-    if (age < 4000) return STATE.allOverviews;
-  }
   const results = await Promise.all(
     targets.map(async (bot) => {
       try {
@@ -3352,7 +3348,17 @@ function setSidebarOpen(open) {
   }
 }
 
+function updateTopbarBack(view) {
+  const back = document.getElementById("backBtn");
+  if (!back) return;
+  back.hidden = view === "dashboard";
+}
+
 function bindMobileNav() {
+  document.getElementById("backBtn")?.addEventListener("click", () => {
+    setSidebarOpen(false);
+    switchView("dashboard");
+  });
   document.getElementById("menuBtn")?.addEventListener("click", () => {
     setSidebarOpen(!document.body.classList.contains("sidebar-open"));
   });
@@ -3705,6 +3711,7 @@ function switchView(name, opts = {}) {
   document.querySelectorAll(".nav-item").forEach((n) => {
     n.classList.toggle("active", n.dataset.page === name);
   });
+  updateTopbarBack(name);
   if (opts.skipRefresh) return;
   if (name === "servers") refreshServers();
   else if (name === "accounts") refreshAccounts(true);

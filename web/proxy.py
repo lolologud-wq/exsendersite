@@ -405,19 +405,22 @@ async def fetch_overview(rec: BotRecord, *, force: bool = False) -> dict[str, An
         cached = _overview_cache.get(rec.id)
         if cached and now - cached[0] < OVERVIEW_CACHE_TTL:
             return cached[1]
-        try:
-            from overview_cache import get as get_overview_cache
 
-            disk = get_overview_cache(rec.id, max_age_sec=86400)
-            if disk is not None:
-                _overview_cache[rec.id] = (now, disk)
-                return disk
-        except Exception:
-            pass
+    try:
+        status, data = await get_json(rec, "overview", timeout=OVERVIEW_TIMEOUT)
+        if status != 200 or not isinstance(data, dict):
+            raise RuntimeError(f"overview HTTP {status}")
+    except Exception:
+        if not force:
+            try:
+                from overview_cache import get as get_overview_cache
 
-    status, data = await get_json(rec, "overview", timeout=OVERVIEW_TIMEOUT)
-    if status != 200 or not isinstance(data, dict):
-        raise RuntimeError(f"overview HTTP {status}")
+                disk = get_overview_cache(rec.id, max_age_sec=86400)
+                if disk is not None:
+                    return disk
+            except Exception:
+                pass
+        raise
 
     _overview_cache[rec.id] = (now, data)
     try:
