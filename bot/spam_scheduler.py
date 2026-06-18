@@ -26,36 +26,6 @@ _spam_loop_tasks: dict[str, asyncio.Task] = {}
 _GAP = 1.5
 _FORBIDDEN_BACKOFF_SEC = 3600.0
 
-# Minimum time between ANY two sends on one account (keyed by account_key).
-_account_last_send: dict[str, float] = {}
-
-
-def _account_gap_sec(state: RuntimeState) -> float:
-    base_min = max(0.1, float(state.default_interval_min or 5))
-    for cid in enabled_chat_ids(state):
-        c = state.cfg(cid)
-        if c.custom_interval_min is not None and c.custom_interval_min > 0:
-            base_min = max(base_min, float(c.custom_interval_min))
-    return base_min * 60.0
-
-
-async def _wait_for_account_gap(account_key: Optional[str], state: RuntimeState) -> bool:
-    """Sleep until global inter-message gap elapsed. False = spam stopped."""
-    if not account_key:
-        return True
-    gap = _account_gap_sec(state)
-    last = _account_last_send.get(account_key, 0.0)
-    if state.last_send_at > last:
-        last = state.last_send_at
-    wait = last + gap - time.time()
-    while wait > 0:
-        if not state.spam_running:
-            return False
-        chunk = min(wait, 2.0)
-        await asyncio.sleep(chunk)
-        wait = last + gap - time.time()
-    return True
-
 
 def _mark_account_send(
     account_key: Optional[str],
@@ -64,7 +34,6 @@ def _mark_account_send(
 ) -> None:
     if account_key:
         ts = time.time()
-        _account_last_send[account_key] = ts
         state.last_send_at = ts
         persist()
 
@@ -234,9 +203,6 @@ async def spam_loop(
     next_fire: dict[int, float] = {}
     seen_interval_seq = -1
 
-    if account_key and state.last_send_at > 0:
-        _account_last_send[account_key] = state.last_send_at
-
     while True:
         await asyncio.sleep(2)
         try:
@@ -280,8 +246,6 @@ async def spam_loop(
             due.sort(key=lambda x: next_fire.get(x, 0))
             cid = due[0]
 
-            if not await _wait_for_account_gap(account_key, state):
-                continue
             if not state.spam_running:
                 continue
             if cid not in enabled_chat_ids(state):
@@ -358,6 +322,7 @@ async def spam_loop(
                     c3.enabled = False
                 state.set_cfg(cid, c3)
                 persist()
+                next_fire[cid] = _schedule_next_fire(state, cid)
                 if hit:
                     del next_fire[cid]
                     logger.info(
@@ -365,8 +330,8 @@ async def spam_loop(
                         lim2,
                         cid,
                     )
-                    await asyncio.sleep(_GAP)
-                    continue
+                await asyncio.sleep(_GAP)
+                continue
             except (FloodWaitError, SlowModeWaitError) as e:
                 wait = int(getattr(e, "seconds", 0) or 0) + 2
                 logger.warning(

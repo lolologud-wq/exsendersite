@@ -10,9 +10,12 @@
       "api_port": 8765,
       "api_token": "z-XIu_4fYsgqcAFcrcWVT56UdWlGPl4TjGlEQ5xbSVA",
       "status": "running",
-      "last_deploy_at": 1779573787.2683446,
+      "last_deploy_at": 1781824264.233254,
       "last_error": "",
-      "has_ssh_key": true
+      "has_ssh_key": true,
+      "restart_interval_hours": 12,
+      "owner_id": "",
+      "suite": "sender"
     }
   }
 }

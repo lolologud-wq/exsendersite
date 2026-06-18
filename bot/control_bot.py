@@ -28,7 +28,7 @@ from proxy_util import parse_proxy
 from telethon_accounts import connect_client_with_fallback, make_telethon_client, session_path
 from telethon_client_profile import get_telegram_api_config, request_login_code
 from telethon_join import join_chat_or_channel_by_link, resolve_tme_post_for_forward
-from spam_scheduler import start_spam_loop_background
+from spam_scheduler import restart_spam_loop_background
 from state import (
     MultiAccountState,
     RuntimeState,
@@ -173,7 +173,7 @@ async def _after_telethon_sign_in(
     boot_auth = context.bot_data.get("authorized_at_boot") or frozenset()
     if aid not in boot_auth:
         asyncio.create_task(_run_until_disconnected_logged(client, aid))
-    start_spam_loop_background(
+    restart_spam_loop_background(
         client,
         multi.accounts[aid],
         persist=lambda: save_multi_account_state(multi),
@@ -998,13 +998,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             return
         clients[new_id] = client
-        if created:
-            start_spam_loop_background(
-                client,
-                multi.accounts[new_id],
-                persist=lambda: save_multi_account_state(multi),
-                account_key=new_id,
-            )
+        restart_spam_loop_background(
+            client,
+            multi.accounts[new_id],
+            persist=lambda: save_multi_account_state(multi),
+            account_key=new_id,
+        )
         if not await client.is_user_authorized():
             context.user_data["wait"] = ("tauth_phone", new_id)
             await q.answer()
@@ -1057,6 +1056,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         state.spam_running = True
         _persist(context)
+        multi = context.bot_data["multi"]
+        aid = multi.active_account_id
+        spam_client = context.bot_data["telethon_clients"].get(aid) or tc
+        if spam_client is not None and aid:
+            restart_spam_loop_background(
+                spam_client,
+                state,
+                persist=lambda: save_multi_account_state(multi),
+                account_key=aid,
+            )
         await q.answer("Спам запущен.")
         t1, kb1 = await _home_text_kb(state, online, context)
         await _edit_cb_message(
@@ -1893,7 +1902,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 return
             clients[new_id] = nc
-            start_spam_loop_background(
+            restart_spam_loop_background(
                 nc,
                 multi.accounts[new_id],
                 persist=lambda: save_multi_account_state(multi),

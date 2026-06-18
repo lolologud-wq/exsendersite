@@ -442,6 +442,8 @@ def _merge_remote_env(env: dict[str, str], remote: dict[str, str]) -> dict[str, 
         merged["TG_BOT_TOKEN"] = remote.get("BOT_TOKEN", remote.get("TG_BOT_TOKEN", ""))
     if not str(merged.get("BOT_TOKEN", "")).strip() and merged.get("TG_BOT_TOKEN"):
         merged["BOT_TOKEN"] = merged["TG_BOT_TOKEN"]
+    if not str(merged.get("BOT_API_PORT", "")).strip() and remote.get("BOT_API_PORT"):
+        merged["BOT_API_PORT"] = remote["BOT_API_PORT"]
     return merged
 
 
@@ -544,12 +546,18 @@ async def deploy(
                         sudo_password=sudo_password,
                     )
 
-                # pick API port before writing .env
-                api_port = await _pick_api_port(conn, rec.api_port)
+                # pick API port before writing .env (keep existing port on redeploy)
+                preferred = rec.api_port
+                remote_port_raw = str(deploy_env.get("BOT_API_PORT") or "").strip().strip('"')
+                if remote_port_raw.isdigit():
+                    preferred = int(remote_port_raw)
+                api_port = await _pick_api_port(conn, preferred)
                 if api_port != rec.api_port:
                     st.add(f"Порт {rec.api_port} занят (часто Apache) → используем {api_port}")
                     registry.update(bid, api_port=api_port)
                     rec = registry.get(bid) or rec
+                elif api_port != preferred and preferred == rec.api_port:
+                    registry.update(bid, api_port=api_port)
                 full_env = _normalize_bot_env(deploy_env, token, api_port)
 
                 # 1) deploy key

@@ -33,7 +33,7 @@ from control_bot import (
     _telethon_ready,
 )
 from proxy_util import parse_proxy
-from spam_scheduler import restart_spam_loop_background, start_spam_loop_background
+from spam_scheduler import restart_spam_loop_background
 from state import (
     ChatSpamConfig,
     MultiAccountState,
@@ -886,7 +886,8 @@ class BotService:
 
     def _ensure_spam_loop(self, slot_id: str, client: TelegramClient) -> None:
         state = self._require_account(slot_id)
-        start_spam_loop_background(
+        # Always restart: loop captures client at start; stale ref after auth/reconnect.
+        restart_spam_loop_background(
             client, state, persist=self._save, account_key=slot_id
         )
 
